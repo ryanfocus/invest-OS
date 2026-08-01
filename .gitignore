@@ -1,0 +1,36 @@
+# 機密：期貨帳密、Discord webhook。絕對不可進版控
+.env
+
+# 群益憑證與相關金鑰（若日後放進專案目錄）
+*.pfx
+*.cer
+*.key
+
+# 部位狀態：每台機器各自維護，不同步
+# 這份檔案是 13:40 出場的唯一依據，遺失就不知道該平幾口
+state/
+
+# 執行紀錄與快照
+logs/
+debug/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+
+# 虛擬環境
+.venv/
+.venv-local/
+venv/
+env/
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# 系統
+.DS_Store
+Thumbs.db
