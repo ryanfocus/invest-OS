@@ -1,10 +1,10 @@
 PyYAML>=6.0
 requests>=2.31
 
-# 群益 API（Windows COM）。策略邏輯與測試不依賴這兩個套件——
-# broker 的真實實作才會用到，見 broker/__init__.py 的說明。
-comtypes>=1.2.0
-pywin32>=306
+# 群益 API（Windows COM）。加 platform marker 是為了讓策略邏輯能在非 Windows 上
+# 開發與測試——這兩個套件在別的平台裝不起來，而 broker 以外的程式碼都不需要它們。
+comtypes>=1.2.0; sys_platform == "win32"
+pywin32>=306; sys_platform == "win32"
 
 # 開發
 pytest>=8.0

@@ -24,10 +24,10 @@ _SIGNAL_TEXT = {
 }
 
 
-def build_signal_payload(result: SignalResult, d: date) -> dict:
+def build_signal_payload(result: SignalResult, trading_date: date) -> dict:
     """把訊號結果組成 Discord webhook 的 payload。純函式，無 I/O。"""
     lines = [
-        f"{d.strftime('%Y/%m/%d')} OS",
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
         f"大台開盤：{result.tx:.0f}",
         f"小台開盤：{result.mtx:.0f}",
         f"微台開盤：{result.tmf:.0f}",

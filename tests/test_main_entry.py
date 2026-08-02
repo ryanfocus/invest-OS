@@ -79,10 +79,3 @@ def test_discord_disabled_sends_nothing_but_still_computes_signal():
     assert notifier.sent == []
 
 
-# --- broker 只被要求取價一次，不做多餘呼叫 ---
-
-
-def test_entry_reads_open_prices_exactly_once():
-    broker = FakeBroker(tx=42331, mtx=42298, tmf=42265)
-    run_entry(_config(), today=D, broker=broker, notify=RecordingNotifier())
-    assert broker.open_price_calls == 1

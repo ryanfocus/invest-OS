@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from datetime import date
 
 import strategy
+from broker import OpenPrices
+from notifiers.discord import build_signal_payload
 from settings import Config
 
 logger = logging.getLogger(__name__)
@@ -24,7 +26,7 @@ class EntryOutcome:
     """進場流程的結果，供呼叫端與測試檢視。"""
 
     signal: str
-    opens: object          # broker.OpenPrices
+    opens: OpenPrices
     notified: bool
 
 
@@ -41,9 +43,6 @@ def run_entry(config: Config, today: date, broker, notify) -> EntryOutcome:
 
     notified = False
     if config.discord_enabled:
-        # 延遲 import：讓 notifiers 的相依（requests）不成為策略邏輯測試的必要條件
-        from notifiers.discord import build_signal_payload
-
         notified = bool(notify(build_signal_payload(result, today)))
     else:
         logger.info("Discord 已關閉，不發送")

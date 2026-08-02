@@ -24,19 +24,6 @@ from main import run_entry  # noqa: E402
 from notifiers.discord import send  # noqa: E402
 
 
-def _load_webhook() -> str:
-    """從 .env 讀 webhook。刻意不引入 dotenv，少一個相依。"""
-    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
-    if not os.path.exists(env_path):
-        return ""
-    with open(env_path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line.startswith("DISCORD_WEBHOOK_URL="):
-                return line.split("=", 1)[1].strip()
-    return ""
-
-
 def main() -> int:
     args = sys.argv[1:]
     if len(args) == 3:
@@ -47,7 +34,7 @@ def main() -> int:
         print("用法：demo_entry.py [大台開盤 小台開盤 微台開盤]")
         return 2
 
-    webhook = _load_webhook()
+    webhook = settings.read_env("DISCORD_WEBHOOK_URL")
     if not webhook:
         print("找不到 DISCORD_WEBHOOK_URL（.env）——只印出訊息，不實際發送")
 
