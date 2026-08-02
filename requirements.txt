@@ -1,0 +1,10 @@
+PyYAML>=6.0
+requests>=2.31
+
+# 群益 API（Windows COM）。策略邏輯與測試不依賴這兩個套件——
+# broker 的真實實作才會用到，見 broker/__init__.py 的說明。
+comtypes>=1.2.0
+pywin32>=306
+
+# 開發
+pytest>=8.0
