@@ -1,7 +1,7 @@
 # CONTEXT — invest-os 詞彙表
 
 > 這份文件**只放詞彙定義**，不放實作細節、不放規格、不當草稿紙。
-> 需求看 [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)。
+> 規格看 [docs/SPEC.md](docs/SPEC.md)，架構決策看 [docs/adr/](docs/adr/)。
 
 ---
 
@@ -85,7 +85,8 @@
 使用者在 OS 之外、自行長期持有的台指期部位。
 
 OS **不管理**它，但因台灣期貨同一帳戶同商品同月份採**淨額**計算，
-OS 的部位與它會在帳戶層級互相沖銷。詳見 REQUIREMENTS §4 與 §12。
+OS 的部位與它會在帳戶層級互相沖銷。詳見 [SPEC](docs/SPEC.md) 的「部位隔離」
+與「使用者原有部位會受到的影響」。
 
 ## 進場 / 出場
 
