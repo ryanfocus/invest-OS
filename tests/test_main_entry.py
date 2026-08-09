@@ -26,7 +26,8 @@ class RecordingNotifier:
 
 
 def _config(**overrides):
-    base = {"discord_enabled": True}
+    base = {"discord_enabled": True, "quote_retry_attempts": 3,
+            "quote_retry_interval_seconds": 60}
     base.update(overrides)
     return settings_module.Config(**base)
 

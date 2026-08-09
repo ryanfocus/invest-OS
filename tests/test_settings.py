@@ -26,7 +26,9 @@ def test_no_orphan_settings_and_no_phantom_reads():
 
 def test_orphan_key_is_detected():
     """加一個沒人讀的設定，漂移檢查必須抓到。"""
-    raw = {"discord": {"enabled": True}, "unused": {"knob": 1}}
+    raw = {"discord": {"enabled": True},
+           "quote": {"retry_attempts": 3, "retry_interval_seconds": 60},
+           "unused": {"knob": 1}}
     assert settings_module.consumed_keys(raw) != settings_module.flatten_keys(raw)
 
 

@@ -24,6 +24,8 @@ _ENV_PATH = os.path.join(_ROOT, ".env")
 @dataclass(frozen=True)
 class Config:
     discord_enabled: bool
+    quote_retry_attempts: int
+    quote_retry_interval_seconds: int
 
 
 def read_raw(path: str = _SETTINGS_PATH) -> dict:
@@ -66,7 +68,11 @@ class _Tracked:
 
 def build(raw) -> Config:
     """從原始 mapping 組出 Config。缺 key 會拋 KeyError，不靜默補預設值。"""
-    return Config(discord_enabled=raw["discord"]["enabled"])
+    return Config(
+        discord_enabled=raw["discord"]["enabled"],
+        quote_retry_attempts=raw["quote"]["retry_attempts"],
+        quote_retry_interval_seconds=raw["quote"]["retry_interval_seconds"],
+    )
 
 
 def consumed_keys(raw: dict) -> set:
