@@ -6,7 +6,7 @@
 
 from datetime import date
 
-import settings as settings_module
+from conftest import RecordingNotifier, make_config
 from broker.fake import FakeBroker
 from main import run_entry
 from strategy import LONG, NO_TRADE, SHORT
@@ -14,28 +14,10 @@ from strategy import LONG, NO_TRADE, SHORT
 D = date(2026, 7, 31)
 
 
-class RecordingNotifier:
-    """記錄被要求送出什麼，取代真正的 Discord。"""
-
-    def __init__(self):
-        self.sent = []
-
-    def __call__(self, payload) -> bool:
-        self.sent.append(payload)
-        return True
-
-
-def _config(**overrides):
-    base = {"discord_enabled": True, "quote_retry_attempts": 3,
-            "quote_retry_interval_seconds": 60}
-    base.update(overrides)
-    return settings_module.Config(**base)
-
-
 def _run(tx, mtx, tmf, cfg=None, notifier=None):
     notifier = notifier or RecordingNotifier()
     outcome = run_entry(
-        cfg or _config(),
+        cfg or make_config(),
         today=D,
         broker=FakeBroker(tx=tx, mtx=mtx, tmf=tmf),
         notify=notifier,
@@ -75,7 +57,7 @@ def test_short_signal_flows_through():
 
 
 def test_discord_disabled_sends_nothing_but_still_computes_signal():
-    outcome, notifier = _run(42331, 42298, 42265, cfg=_config(discord_enabled=False))
+    outcome, notifier = _run(42331, 42298, 42265, cfg=make_config(discord_enabled=False))
     assert outcome.signal == LONG
     assert notifier.sent == []
 

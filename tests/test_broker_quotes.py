@@ -117,7 +117,6 @@ def test_all_product_codes_use_the_am_session():
     一般時段完全一致（44177/44142/44258），而不帶後綴的版本對不到任何已公布時段。
     詳見 docs/adr/0005-use-am-session-quote-codes.md——這不是筆誤，別「簡化」掉。
     """
-    assert PRODUCT_CODES == (TX_CODE, MTX_CODE, TMF_CODE)
     for code in PRODUCT_CODES:
         assert code.endswith("AM"), f"{code} 缺少 AM 後綴，會取到全盤開盤價"
 

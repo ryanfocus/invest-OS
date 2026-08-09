@@ -27,6 +27,22 @@ class Config:
     quote_retry_attempts: int
     quote_retry_interval_seconds: int
 
+    def __post_init__(self) -> None:
+        """設定錯誤要在**載入時**就炸，不可以偽裝成執行期的「今日無訊號」。
+
+        放在這裡而不是 `build()`，是因為測試會直接建構 Config——
+        兩條路都要被擋住，否則守不住的那條遲早會被用上。
+        """
+        if self.quote_retry_attempts < 1:
+            raise ValueError(
+                f"quote.retry_attempts 必須 ≥ 1，目前是 {self.quote_retry_attempts}"
+            )
+        if self.quote_retry_interval_seconds < 0:
+            raise ValueError(
+                f"quote.retry_interval_seconds 不可為負，目前是 "
+                f"{self.quote_retry_interval_seconds}"
+            )
+
 
 def read_raw(path: str = _SETTINGS_PATH) -> dict:
     with open(path, encoding="utf-8") as fh:

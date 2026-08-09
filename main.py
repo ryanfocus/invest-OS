@@ -67,16 +67,23 @@ def run_entry(config: Config, today: date, broker, notify, sleep=time.sleep) -> 
             return False
         return bool(notify(payload))
 
+    def _fatal(reason: str) -> EntryOutcome:
+        logger.error("致命錯誤：%s", reason)
+        notified = _send(build_no_signal_payload(reason, today))
+        return EntryOutcome(
+            signal=None, opens=None, notified=notified, exit_code=1, failure=reason
+        )
+
     try:
         broker.login()
     except LoginFailed as exc:
         # 登入失敗重試無用（密碼、憑證、聲明書都要人處理），直接以錯誤結束。
-        # 但一定要發通知——靜默會讓人以為今天只是沒訊號。
-        logger.error("登入失敗：%s", exc)
-        notified = _send(build_no_signal_payload(f"登入失敗：{exc}", today))
-        return EntryOutcome(
-            signal=None, opens=None, notified=notified, exit_code=1, failure=str(exc)
-        )
+        return _fatal(f"登入失敗：{exc}")
+    except Exception as exc:  # noqa: BLE001
+        # ⚠️ 這一條不可以拿掉。COM 元件沒註冊會拋 ImportError、CreateObject 會拋 OSError，
+        # 都不是 LoginFailed。少了它，例外會直接逃出 run_entry 而**一則通知都不發**——
+        # 使用者會以為今天只是沒訊號，實際上程式根本沒跑起來。
+        return _fatal(f"登入時發生非預期錯誤（{type(exc).__name__}）：{exc}")
 
     try:
         opens = _fetch_open_prices(
@@ -93,6 +100,9 @@ def run_entry(config: Config, today: date, broker, notify, sleep=time.sleep) -> 
         return EntryOutcome(
             signal=None, opens=None, notified=notified, exit_code=0, failure=str(exc)
         )
+    except Exception as exc:  # noqa: BLE001
+        # 非 QuoteNotReady 的例外不重試——重試 ImportError 三次沒有意義，只是拖時間。
+        return _fatal(f"取開盤價時發生非預期錯誤（{type(exc).__name__}）：{exc}")
 
     logger.info("開盤價 大台=%s 小台=%s 微台=%s", opens.tx, opens.mtx, opens.tmf)
     result = strategy.compute(tx=opens.tx, mtx=opens.mtx, tmf=opens.tmf)

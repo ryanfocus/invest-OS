@@ -66,3 +66,23 @@ def test_read_env_does_not_match_a_name_that_is_only_a_prefix(tmp_path):
     env = tmp_path / ".env"
     env.write_text("FOO_BAR=wrong\nFOO=right\n", encoding="utf-8")
     assert settings_module.read_env("FOO", path=str(env)) == "right"
+
+
+# --- 重試設定的合理性（code-review 2026-08-09：漂移檢查只比 key 名不比值）---
+
+
+def test_retry_interval_is_long_enough_to_be_worth_retrying():
+    """間隔設成 0 等於取消整個重試機制——三次會在毫秒內燒完。
+
+    「未就緒」的時間尺度是秒到分（報價主機延遲、資料尚未公布），不是毫秒。
+    30 秒是這個下限的保守值；真正的設定是 60。
+    """
+    cfg = settings_module.load()
+    assert cfg.quote_retry_interval_seconds >= 30, (
+        "間隔太短，重試會在資料有機會到齊之前就全部用完"
+    )
+
+
+def test_retry_attempts_is_at_least_two():
+    """只試一次就不叫重試了。"""
+    assert settings_module.load().quote_retry_attempts >= 2

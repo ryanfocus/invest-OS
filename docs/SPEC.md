@@ -1,7 +1,6 @@
 # invest-os — OS 策略開發規格
 
 > 詞彙定義見 [CONTEXT.md](../CONTEXT.md)｜架構決策見 [docs/adr/](adr/)
-> 架構決策見 [docs/adr/](adr/)｜建立日期：2026-08-01
 
 ---
 

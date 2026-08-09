@@ -49,7 +49,7 @@ _STOCKS_READY = 3003
 # 群益的價格是整數且放大 100 倍
 _PRICE_SCALE = 100.0
 
-__all__ = ["CapitalBroker", "PRODUCT_CODES"]
+__all__ = ["CapitalBroker"]
 
 
 def _resolve_dll_path() -> str:
@@ -112,6 +112,7 @@ class CapitalBroker:
         self._quote = None
         self._quote_events = None
         self._handlers: list = []      # 事件 handler 要留著，被回收就收不到事件了
+        self._monitoring = False
         self._subscribed = False
 
     # --- 內部：COM 生命週期 ---
@@ -151,13 +152,22 @@ class CapitalBroker:
             time.sleep(0.05)
         return False
 
+    def _pump_for(self, seconds: float) -> None:
+        """單純打滿指定秒數的訊息幫浦，不等待任何條件。"""
+        self._pump_until(lambda: False, seconds)
+
     def _message(self, code: int) -> str:
         return f"代碼 {code}：{self._center.SKCenterLib_GetReturnCodeMessage(code)}"
 
     # --- 對外契約 ---
 
     def login(self) -> None:
-        """登入並連上報價主機。失敗一律 raise LoginFailed（重試無用，要人處理）。"""
+        """**只做身分驗證**。失敗一律 raise LoginFailed（重試無用，要人處理）。
+
+        ⚠️ 報價主機的連線**刻意不放在這裡**。那是會暫時性失敗的東西
+        （主機忙、網路抖動），歸類成 LoginFailed 會讓它跳過重試階梯直接以錯誤結束——
+        08:50 的一次小抖動就會賠掉整天的訊號。它屬於 `get_open_prices` 的可重試範圍。
+        """
         self._ensure_com()
 
         # 第三個參數 "Y" 才會啟用報價元件
@@ -168,14 +178,20 @@ class CapitalBroker:
 
         # 聲明書狀態是登入後非同步查回來的，沒等它就連報價主機會拿到 2018
         self._center.SKCenterLib_RequestAgreement(self._user_id)
-        self._pump_until(lambda: False, 2.0)
+        self._pump_for(2.0)
+
+    def _ensure_quote_connection(self) -> None:
+        """連上報價主機並訂閱三個商品。失敗一律 QuoteNotReady——這些都值得重試。"""
+        if self._monitoring:
+            return
 
         code = self._quote.SKQuoteLib_EnterMonitorLONG()
         if code != 0:
-            raise LoginFailed(f"連線報價主機失敗，{self._message(code)}")
+            raise QuoteNotReady(f"連線報價主機失敗，{self._message(code)}")
         if not self._pump_until(lambda: self._quote_events.stocks_ready, self._connect_timeout):
-            raise LoginFailed(f"{self._connect_timeout:.0f} 秒內未收到商品資料就緒通知")
+            raise QuoteNotReady(f"{self._connect_timeout:.0f} 秒內未收到商品資料就緒通知")
         logger.info("報價主機連線完成")
+        self._monitoring = True
 
     def get_open_prices(self) -> OpenPrices:
         """取三個商品的當日 AM 盤開盤價。
@@ -186,6 +202,8 @@ class CapitalBroker:
         if self._center is None:
             raise QuoteNotReady("尚未登入")
 
+        self._ensure_quote_connection()
+
         if not self._subscribed:
             page_no = 0
             page_no, code = self._quote.SKQuoteLib_RequestStocks(page_no, ",".join(PRODUCT_CODES))
@@ -195,7 +213,7 @@ class CapitalBroker:
             self._pump_until(lambda: self._quote_events.quote_updates > 0, 15.0)
             self._subscribed = True
         else:
-            self._pump_until(lambda: False, 1.0)
+            self._pump_for(1.0)
 
         quotes = {}
         for code_str in PRODUCT_CODES:

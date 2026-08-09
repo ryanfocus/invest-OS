@@ -5,12 +5,13 @@
   無法判斷 —— 資料拿不到，**不是不動作**，程式仍正常結束
   致命     —— 登入失敗，以錯誤結束
 
-不斷言重試間隔或呼叫次數（那是實作細節）；只斷言「會再試」與「試完會做什麼」。
+不斷言重試間隔或重試次數（那是實作細節）；只斷言「會再試」與「試完會做什麼」。
+唯一的呼叫觀察是「**零**呼叫」——那是在證明某件事沒發生，屬於行為斷言。
 """
 
 from datetime import date
 
-import settings as settings_module
+from conftest import RecordingNotifier, make_config
 from broker import LoginFailed, OpenPrices, QuoteNotReady
 from broker.fake import FakeBroker
 from main import run_entry
@@ -22,29 +23,10 @@ D = date(2026, 7, 31)
 GOOD = OpenPrices(tx=42331, mtx=42298, tmf=42265)
 
 
-class RecordingNotifier:
-    def __init__(self):
-        self.sent = []
-
-    def __call__(self, payload) -> bool:
-        self.sent.append(payload)
-        return True
-
-    @property
-    def text(self) -> str:
-        return "\n".join(p["content"] for p in self.sent)
-
-
-def _config(**overrides):
-    base = {"discord_enabled": True, "quote_retry_attempts": 3, "quote_retry_interval_seconds": 60}
-    base.update(overrides)
-    return settings_module.Config(**base)
-
-
 def _run(broker, cfg=None):
     notifier = RecordingNotifier()
     outcome = run_entry(
-        cfg or _config(),
+        cfg or make_config(),
         today=D,
         broker=broker,
         notify=notifier,
@@ -89,10 +71,10 @@ def test_no_signal_message_is_distinguishable_from_no_trade():
     assert "TM0000AM" in notifier.text, "要講出是哪個商品出問題，否則無從排查"
 
 
-def test_retry_count_comes_from_config():
+def test_retry_count_comes_frommake_config():
     """把重試次數設成 1 就只試一次——證明設定真的有生效。"""
     broker = FakeBroker(script=[QuoteNotReady("尚未成交"), GOOD])
-    outcome, _ = _run(broker, cfg=_config(quote_retry_attempts=1))
+    outcome, _ = _run(broker, cfg=make_config(quote_retry_attempts=1))
     assert outcome.signal is None, "只准試一次，第二次的好資料不該被拿到"
 
 
@@ -119,6 +101,59 @@ def test_login_failure_does_not_ask_for_quotes():
 
 def test_failures_still_return_correct_exit_code_when_discord_off():
     broker = FakeBroker(script=[GOOD], login_error=LoginFailed("代碼 600"))
-    outcome, notifier = _run(broker, cfg=_config(discord_enabled=False))
+    outcome, notifier = _run(broker, cfg=make_config(discord_enabled=False))
     assert outcome.exit_code != 0
     assert notifier.sent == []
+
+
+# --- 非預期例外不可靜默逃出（code-review 2026-08-09 發現的真實漏洞）---
+
+
+class _ExplodingBroker:
+    """模擬環境壞掉：COM 沒註冊會 ImportError、CreateObject 會 OSError。
+
+    這兩種都**不是** LoginFailed。原本的實作只攔 LoginFailed，
+    於是例外直接逃出 run_entry，一則通知都不發——使用者會以為今天只是沒訊號。
+    """
+
+    def __init__(self, error, fail_on="login"):
+        self._error = error
+        self._fail_on = fail_on
+        self.open_price_calls = 0
+
+    def login(self):
+        if self._fail_on == "login":
+            raise self._error
+
+    def get_open_prices(self):
+        self.open_price_calls += 1
+        raise self._error
+
+
+def test_unexpected_login_error_still_notifies_and_exits_with_error():
+    broker = _ExplodingBroker(ImportError("comtypes 沒裝"))
+    outcome, notifier = _run(broker)
+    assert outcome.exit_code != 0
+    assert len(notifier.sent) == 1, "非預期例外也必須通知，絕不可靜默"
+    assert "comtypes" in notifier.text
+
+
+def test_unexpected_quote_error_is_fatal_and_not_retried():
+    """重試 ImportError 三次沒有意義，只是拖時間。"""
+    broker = _ExplodingBroker(OSError("COM 物件建立失敗"), fail_on="quote")
+    outcome, notifier = _run(broker)
+    assert outcome.exit_code != 0
+    assert broker.open_price_calls == 1, "非預期例外不該重試"
+    assert len(notifier.sent) == 1
+
+
+def test_zero_retry_attempts_is_rejected_when_config_is_built():
+    """設定成 0 次會讓迴圈一次都不跑（原本拋 TypeError）。
+
+    驗證發生在 Config 建構時，不是執行到一半才發現——
+    設定錯誤偽裝成「今日無訊號」會讓人以為是市場問題。
+    """
+    import pytest
+
+    with pytest.raises(ValueError, match="retry_attempts"):
+        make_config(quote_retry_attempts=0)

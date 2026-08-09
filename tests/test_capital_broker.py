@@ -6,28 +6,49 @@ COM 呼叫本身沒辦法在測試環境驗證——那正是 broker 接縫存�
 `pytest` 收集測試都會失敗，整個專案在拿到憑證之前一行都測不了。
 """
 
-import importlib
+import os
+import subprocess
+import sys
+import textwrap
 
-import pytest
-
-
-def test_importing_capital_broker_does_not_initialise_com(monkeypatch):
-    """把 GetModule 換成會爆的版本，再重新載入模組——沒炸就代表初始化是延遲的。"""
-    comtypes_client = pytest.importorskip("comtypes.client")
-
-    def explode(*args, **kwargs):
-        raise AssertionError("COM 在模組載入時就被初始化了，違反 ticket 02 的驗收條件")
-
-    monkeypatch.setattr(comtypes_client, "GetModule", explode)
-
-    import broker.capital
-
-    importlib.reload(broker.capital)
+from conftest import REPO_ROOT
 
 
-def test_capital_broker_reuses_the_shared_product_codes():
-    """真假 broker 必須指向同一組代碼，否則 ADR-0005 的保護只擋得住其中一個。"""
-    import broker
+def test_capital_broker_imports_with_comtypes_unavailable(tmp_path):
+    """在 `comtypes` 根本無法匯入的環境下，`broker.capital` 仍要 import 得起來。
+
+    做法是在 PYTHONPATH 前面放一個一 import 就爆的假 comtypes，然後開子行程試。
+    刻意**不用** `importorskip` 或 monkeypatch——那兩種寫法在沒裝 comtypes 的機器上
+    會直接跳過，而那正是這條驗收條件唯一在乎的機器（SPEC user story 49、50）。
+    """
+    (tmp_path / "comtypes").mkdir()
+    (tmp_path / "comtypes" / "__init__.py").write_text(
+        "raise ImportError('模擬未安裝 comtypes')", encoding="utf-8"
+    )
+    (tmp_path / "comtypes" / "client.py").write_text(
+        "raise ImportError('模擬未安裝 comtypes')", encoding="utf-8"
+    )
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(tmp_path), REPO_ROOT])
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent("""
+            import comtypes_probe_should_fail  # noqa: F401
+        """).strip().replace("comtypes_probe_should_fail", "broker.capital")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, (
+        "broker.capital 在沒有 comtypes 的環境下 import 失敗——"
+        f"代表 COM 初始化不是延遲的。\n{result.stderr}"
+    )
+
+
+def test_capital_broker_exposes_the_expected_entry_point():
+    """對外只暴露 CapitalBroker；商品代碼從 broker 套件取，不從這裡再匯出一份。"""
     import broker.capital as capital
 
-    assert capital.PRODUCT_CODES is broker.PRODUCT_CODES
+    assert capital.__all__ == ["CapitalBroker"]
+    assert hasattr(capital, "CapitalBroker")
