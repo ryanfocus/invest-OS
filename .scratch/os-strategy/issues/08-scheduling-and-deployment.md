@@ -1,9 +1,9 @@
-# 07 — 排程與部署
+# 08 — 排程與部署
 
 **What to build:** 程式不再需要人工執行。Windows 工作排程器在進場與出場時間各叫醒它一次，
 完整跑過一個交易日——早上收到訊號通知，下午正常出場。
 
-**Blocked by:** 05
+**Blocked by:** 06
 
 **Status:** ready-for-agent
 

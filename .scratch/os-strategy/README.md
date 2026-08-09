@@ -7,38 +7,41 @@
 ## 依賴關係
 
 ```
-01 骨架 + 訊號 + 假 broker + Discord
- └→ 02 真實 broker：登入 + 取開盤價          ⭐ 全案閘門
+01 骨架 + 訊號 + 假 broker + Discord          ✅ done
+ └→ 02 真實 broker：登入 + 取開盤價
      └→ 03 交易日與近月合約判定
          └→ 04 進場下單 + 狀態檔 + 開關
-             ├→ 05 出場流程
-             │   └→ 07 排程與部署
-             └→ 06 隔日對帳
+             ├→ 05 部位一致性防護  ⭐ 唯一會直接虧錢的失效模式
+             │   └→ 06 出場流程
+             │       └→ 08 排程與部署
+             └→ 07 隔日對帳
 ```
 
-04 完成後，**05 與 06 可並行**。
+04 完成後，**05→06→08 這條線與 07 可並行**。
 
 ## 清單
 
-| # | Ticket | Blocked by |
-|---|--------|-----------|
-| 01 | [專案骨架 + 訊號計算 + 假 broker + Discord](issues/01-skeleton-signal-fake-broker-discord.md) | — |
-| 02 | [真實 broker：登入與取得開盤價](issues/02-real-broker-login-and-open-price.md) | 01 |
-| 03 | [交易日與近月合約判定](issues/03-trading-day-and-front-month.md) | 02 |
-| 04 | [進場下單、狀態檔與開關](issues/04-entry-order-and-position-state.md) | 03 |
-| 05 | [出場流程](issues/05-exit-flow.md) | 04 |
-| 06 | [隔日對帳](issues/06-next-day-reconciliation.md) | 04 |
-| 07 | [排程與部署](issues/07-scheduling-and-deployment.md) | 05 |
+| # | Ticket | Blocked by | 狀態 |
+|---|--------|-----------|------|
+| 01 | [專案骨架 + 訊號計算 + 假 broker + Discord](issues/01-skeleton-signal-fake-broker-discord.md) | — | ✅ done |
+| 02 | [真實 broker：登入與取得開盤價](issues/02-real-broker-login-and-open-price.md) | 01 | |
+| 03 | [交易日與近月合約判定](issues/03-trading-day-and-front-month.md) | 02 | |
+| 04 | [進場下單、狀態檔與開關](issues/04-entry-order-and-position-state.md) | 03 | |
+| 05 | [部位一致性防護](issues/05-position-consistency-guard.md) | 04 | |
+| 06 | [出場流程](issues/06-exit-flow.md) | 05 | |
+| 07 | [隔日對帳](issues/07-next-day-reconciliation.md) | 04 | |
+| 08 | [排程與部署](issues/08-scheduling-and-deployment.md) | 06 | |
 
-## 三個必須實機驗證的項目
+## 實機驗證項目
 
 規格標明在這些確認之前**不可開啟自動下單**：
 
-| 項目 | 由哪張 ticket 解決 |
-|------|-----------------|
-| 微台的商品代號 | 02 |
-| **開盤價是 AM 盤還是全盤** | 02 |
-| 倉別參數填新倉還是自動 | 04 |
+| 項目 | 由哪張解決 | 狀態 |
+|------|-----------|------|
+| 微台的商品代號 | 02 | ✅ `TM0000AM`（2026-08-07 實測） |
+| **開盤價是 AM 盤還是全盤** | 02 | ✅ 必須用 `AM` 後綴（[ADR-0005](../../docs/adr/0005-use-am-session-quote-codes.md)） |
+| 倉別參數（新倉／自動） | 04 | ⏳ 待測試環境實打 |
 
-第二項是唯一一個「錯了會讓每天訊號都錯、卻從數字看不出來」的風險。
-`tools/verify_login.py` 就是為了回答前兩項而寫的。
+前兩項曾是「錯了會讓每天訊號都失準、且從數字完全看不出來」的風險。
+實測證實：若用 `TX00` 會取到 44129，正確的 `TX00AM` 是 44177——兩者都是合理的台指價位。
+這也是 07（隔日對帳）必須保留的理由。
