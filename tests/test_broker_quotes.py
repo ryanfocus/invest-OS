@@ -124,3 +124,48 @@ def test_all_product_codes_use_the_am_session():
 def test_micro_taiex_code_uses_four_zeros():
     """微台是 TM0000AM，不是 TM00AM 也不是 TMF00——兩個推定都實測錯過。"""
     assert TMF_CODE == "TM0000AM"
+
+
+# --- L0：新鮮度（2026-08-09 週日實測發現：休市時群益會給上一交易日的價格）---
+
+
+def _quote_on(code, open_price, trading_day):
+    return Quote(code=code, open=open_price, limit_up=48990,
+                 limit_down=40084, trading_day=trading_day)
+
+
+def _all_good_on(day=20260807):
+    return {c: _quote_on(c, p, day)
+            for c, p in ((TX_CODE, 44588), (MTX_CODE, 44600), (TMF_CODE, 44555))}
+
+
+def test_quotes_from_the_expected_trading_day_are_accepted():
+    result = build_open_prices(_all_good_on(20260807), expected_trading_day=20260807)
+    assert result.tx == 44588
+
+
+def test_stale_quotes_are_rejected_even_though_they_look_perfectly_valid():
+    """這是唯一一種看起來完全正常的錯誤，L1 與 L2 都攔不住。
+
+    2026-08-09（週日）實測：群益回的是 08-07 的開盤價——非 0、在漲跌停內、
+    數值合理。沒有 L0 的話，程式會把上週五的價格當成今天的算訊號。
+    """
+    quotes = _all_good_on(20260807)
+    with pytest.raises(QuoteNotReady) as exc:
+        build_open_prices(quotes, expected_trading_day=20260810)
+    message = str(exc.value)
+    assert "20260807" in message and "20260810" in message, "要講清楚拿到的是哪一天"
+
+
+def test_stale_quote_on_a_single_product_is_enough_to_reject():
+    """只要一個商品是舊的就不能算——三個價要來自同一天才有可比性。"""
+    quotes = _all_good_on(20260810)
+    quotes[TMF_CODE] = _quote_on(TMF_CODE, 44555, 20260807)
+    with pytest.raises(QuoteNotReady) as exc:
+        build_open_prices(quotes, expected_trading_day=20260810)
+    assert TMF_CODE in str(exc.value)
+
+
+def test_freshness_check_is_skipped_when_no_expected_day_given():
+    """不帶 expected_trading_day 時維持舊行為，供不在乎日期的情境使用。"""
+    assert build_open_prices(_all_good_on(20260807)).tx == 44588

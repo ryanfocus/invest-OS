@@ -46,7 +46,7 @@ class FakeBroker:
         if self._login_error is not None:
             raise self._login_error
 
-    def get_open_prices(self) -> OpenPrices:
+    def get_open_prices(self, expected_trading_day: int | None = None) -> OpenPrices:
         self.open_price_calls += 1
         item = self._script[0] if len(self._script) == 1 else self._script.pop(0)
         if isinstance(item, Exception):

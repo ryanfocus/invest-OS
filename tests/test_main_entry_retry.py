@@ -71,7 +71,7 @@ def test_no_signal_message_is_distinguishable_from_no_trade():
     assert "TM0000AM" in notifier.text, "要講出是哪個商品出問題，否則無從排查"
 
 
-def test_retry_count_comes_frommake_config():
+def test_retry_count_comes_from_config():
     """把重試次數設成 1 就只試一次——證明設定真的有生效。"""
     broker = FakeBroker(script=[QuoteNotReady("尚未成交"), GOOD])
     outcome, _ = _run(broker, cfg=make_config(quote_retry_attempts=1))
@@ -125,7 +125,7 @@ class _ExplodingBroker:
         if self._fail_on == "login":
             raise self._error
 
-    def get_open_prices(self):
+    def get_open_prices(self, expected_trading_day=None):
         self.open_price_calls += 1
         raise self._error
 

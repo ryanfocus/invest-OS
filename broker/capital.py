@@ -193,7 +193,7 @@ class CapitalBroker:
         logger.info("報價主機連線完成")
         self._monitoring = True
 
-    def get_open_prices(self) -> OpenPrices:
+    def get_open_prices(self, expected_trading_day: int | None = None) -> OpenPrices:
         """取三個商品的當日 AM 盤開盤價。
 
         未就緒或數值不合理時 raise QuoteNotReady——判定邏輯與假 broker 共用
@@ -227,6 +227,9 @@ class CapitalBroker:
                 open=obj.nOpen / _PRICE_SCALE,
                 limit_up=obj.nUp / _PRICE_SCALE,
                 limit_down=obj.nDown / _PRICE_SCALE,
+                # 休市時群益會繼續給上一交易日的價格，且看起來完全正常。
+                # 沒有這個欄位就分不出「今天的」與「上次的」。
+                trading_day=obj.nTradingDay,
             )
 
-        return build_open_prices(quotes)
+        return build_open_prices(quotes, expected_trading_day=expected_trading_day)

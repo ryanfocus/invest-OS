@@ -48,12 +48,19 @@ class QuoteNotReady(BrokerError):
 
 @dataclass(frozen=True)
 class Quote:
-    """單一商品的報價。價格已還原小數（群益回傳為整數且放大 100 倍）。"""
+    """單一商品的報價。價格已還原小數（群益回傳為整數且放大 100 倍）。
+
+    `trading_day` 是這筆報價所屬的**交易日**（`yyyymmdd`）。它存在的理由是：
+    休市時群益不會回「沒有資料」，而是繼續給你**上一個交易日**的價格，
+    而且看起來完全正常（非 0、在漲跌停內）。沒有這個欄位就分不出
+    「今天的開盤價」與「上次的開盤價」。
+    """
 
     code: str
     open: float
     limit_up: float
     limit_down: float
+    trading_day: int | None = None
 
 
 @dataclass(frozen=True)
@@ -65,14 +72,21 @@ class OpenPrices:
     tmf: float
 
 
-def build_open_prices(quotes: dict) -> OpenPrices:
+def build_open_prices(quotes: dict, expected_trading_day: int | None = None) -> OpenPrices:
     """驗證三檔報價後組成 `OpenPrices`，任一不合格就 raise `QuoteNotReady`。
 
-    檢查兩件事，都以**該商品自己的**漲跌停為準——不同商品、不同盤別的漲跌停不同，
+    三件事都以**該商品自己的**資料為準——不同商品、不同盤別的漲跌停不同，
     混用會誤判（實測 AM 盤 48990／40084、全盤 48683／39833）。
 
+      L0 新鮮度：報價所屬交易日必須等於 `expected_trading_day`
       L1 就緒：報價存在，且開盤價不為 0（0 代表當日尚未成交）
       L2 不變量：跌停 ≤ 開盤價 ≤ 漲停（含等號，漲停鎖死是合法開盤價）
+
+    L0 是最重要的一層，因為它擋的是**唯一一種看起來完全正常的錯誤**：
+    休市或報價尚未換日時，群益會給上一個交易日的價格——非 0、在漲跌停內、
+    數值合理，L1 與 L2 全部會放行。實測 2026-08-09（週日）取到的就是 08-07 的價格。
+
+    `expected_trading_day` 為 None 時跳過 L0（供不在乎日期的情境使用）。
 
     問題會一次列完，不是遇到第一個就停——排查時才不必修一個發現還有下一個。
     """
@@ -81,6 +95,12 @@ def build_open_prices(quotes: dict) -> OpenPrices:
         quote = quotes.get(code)
         if quote is None:
             problems.append(f"{code} 沒有報價")
+            continue
+        if expected_trading_day is not None and quote.trading_day != expected_trading_day:
+            problems.append(
+                f"{code} 的報價屬於交易日 {quote.trading_day}，"
+                f"不是預期的 {expected_trading_day}（拿到舊資料）"
+            )
             continue
         if quote.open <= 0:
             problems.append(f"{code} 開盤價為 {quote.open}（尚未成交）")

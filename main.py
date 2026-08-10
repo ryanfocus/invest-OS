@@ -37,7 +37,7 @@ class EntryOutcome:
     failure: str | None = None
 
 
-def _fetch_open_prices(broker, attempts: int, interval: int, sleep) -> OpenPrices:
+def _fetch_open_prices(broker, attempts: int, interval: int, sleep, trading_day: int) -> OpenPrices:
     """取開盤價，未就緒就重試。全部用完仍未就緒 → 讓最後一個 QuoteNotReady 冒出去。
 
     重試存在的理由是 08:50 的報價偶爾晚幾十秒才齊；間隔比次數重要，
@@ -46,7 +46,7 @@ def _fetch_open_prices(broker, attempts: int, interval: int, sleep) -> OpenPrice
     last_error: QuoteNotReady | None = None
     for attempt in range(1, attempts + 1):
         try:
-            return broker.get_open_prices()
+            return broker.get_open_prices(expected_trading_day=trading_day)
         except QuoteNotReady as exc:
             last_error = exc
             logger.warning("第 %d/%d 次取開盤價未就緒：%s", attempt, attempts, exc)
@@ -91,6 +91,9 @@ def run_entry(config: Config, today: date, broker, notify, sleep=time.sleep) -> 
             attempts=config.quote_retry_attempts,
             interval=config.quote_retry_interval_seconds,
             sleep=sleep,
+            # 報價必須屬於今天。休市或尚未換日時群益會給上一交易日的價格，
+            # 而那看起來完全正常——這是唯一 L1/L2 都攔不住的錯誤。
+            trading_day=int(today.strftime("%Y%m%d")),
         )
     except QuoteNotReady as exc:
         # 拿不到資料是預期內的情況（報價主機、商品下架、颱風），不是程式錯誤，
