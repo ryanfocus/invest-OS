@@ -36,6 +36,8 @@ def make_config(**overrides) -> settings_module.Config:
         "discord_enabled": True,
         "quote_retry_attempts": 3,
         "quote_retry_interval_seconds": 60,
+        "calendar_extra_closures": frozenset(),
+        "calendar_extra_openings": frozenset(),
     }
     base.update(overrides)
     return settings_module.Config(**base)

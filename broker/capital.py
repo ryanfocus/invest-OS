@@ -27,15 +27,14 @@ import time
 import winreg
 
 from broker import (
-    MTX_CODE,
     PRODUCT_CODES,
-    TMF_CODE,
-    TX_CODE,
     LoginFailed,
     OpenPrices,
+    ProductListUnavailable,
     Quote,
     QuoteNotReady,
     build_open_prices,
+    parse_product_list,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,6 +44,9 @@ _SKCENTER_CLSID = "{AC30BAB5-194A-4515-A8D3-6260749F8577}"
 
 # 報價主機的連線狀態代碼：收到它才代表商品資料下載完成
 _STOCKS_READY = 3003
+
+# 商品清單的市場別：0 上市、1 上櫃、2 期貨、3 選擇權
+_MARKET_FUTURES = 2
 
 # 群益的價格是整數且放大 100 倍
 _PRICE_SCALE = 100.0
@@ -86,11 +88,12 @@ class _CenterEvents:
 
 
 class _QuoteEvents:
-    """報價連線狀態接收端。"""
+    """報價連線狀態與商品清單的接收端。"""
 
     def __init__(self) -> None:
         self.stocks_ready = False
         self.quote_updates = 0
+        self.commodity_chunks: list = []
 
     def OnConnection(self, nKind, nCode):
         if nKind == _STOCKS_READY:
@@ -98,6 +101,10 @@ class _QuoteEvents:
 
     def OnNotifyQuoteLONG(self, sMarketNo, nIndex):
         self.quote_updates += 1
+
+    def OnNotifyCommodityListWithTypeNo(self, sMarketNo, bstrCommodityData):
+        # 清單很長（實測 46 萬字元），會分多次送來，全部接完再一起解析
+        self.commodity_chunks.append(bstrCommodityData)
 
 
 class CapitalBroker:
@@ -192,6 +199,36 @@ class CapitalBroker:
             raise QuoteNotReady(f"{self._connect_timeout:.0f} 秒內未收到商品資料就緒通知")
         logger.info("報價主機連線完成")
         self._monitoring = True
+
+    def get_contracts(self, wait: float = 8.0) -> dict:
+        """查商品清單，取出三個商品的近月合約與最後交易日。
+
+        近月連續代碼（`TX00AM` 等）在清單裡本身就帶最後交易日，不必自己挑月份。
+        結算日當天它仍指向即將到期的那個合約——那正是我們要的，因為該合約
+        當天 13:30 才停止交易，出場必須用它。
+
+        市場別 2 = 期貨（0 上市、1 上櫃、3 選擇權）。
+        """
+        if self._center is None:
+            raise ProductListUnavailable("尚未登入")
+
+        self._ensure_quote_connection()
+        self._quote_events.commodity_chunks.clear()
+
+        code = self._quote.SKQuoteLib_RequestStockList(_MARKET_FUTURES)
+        if code != 0:
+            raise ProductListUnavailable(f"查詢商品清單失敗，{self._message(code)}")
+
+        # 清單分多次送達，等到三個商品都出現就可以停，不必等完整份
+        def _has_all() -> bool:
+            joined = "".join(self._quote_events.commodity_chunks)
+            return all(c in joined for c in PRODUCT_CODES)
+
+        self._pump_until(_has_all, wait)
+        raw = "".join(self._quote_events.commodity_chunks)
+        if not raw:
+            raise ProductListUnavailable(f"{wait:.0f} 秒內沒收到商品清單")
+        return parse_product_list(raw)
 
     def get_open_prices(self, expected_trading_day: int | None = None) -> OpenPrices:
         """取三個商品的當日 AM 盤開盤價。

@@ -17,3 +17,9 @@ quote:
   #    把間隔設成 0 等於取消整個機制——三次會在毫秒內燒完。
   retry_attempts: 3
   retry_interval_seconds: 60
+
+calendar:
+  # holidays 套件只知道國定假日，不知道這兩種台灣特有的情況。
+  # 格式為 YYYY-MM-DD（yaml 會自動解析成日期），兩邊同時列出時**休市優先**。
+  extra_closures: []   # 臨時休市：颱風假等
+  extra_openings: []   # 臨時開市：補班日等

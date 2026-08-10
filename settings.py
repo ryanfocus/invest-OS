@@ -26,6 +26,9 @@ class Config:
     discord_enabled: bool
     quote_retry_attempts: int
     quote_retry_interval_seconds: int
+    # 臨時休市（颱風假）與臨時開市（補班日）。holidays 套件不知道這兩種。
+    calendar_extra_closures: frozenset = frozenset()
+    calendar_extra_openings: frozenset = frozenset()
 
     def __post_init__(self) -> None:
         """設定錯誤要在**載入時**就炸，不可以偽裝成執行期的「今日無訊號」。
@@ -82,12 +85,21 @@ class _Tracked:
         return value
 
 
+def _parse_dates(values) -> frozenset:
+    """把 yaml 的日期清單轉成 date 集合。yaml 已經幫我們解析成 date 物件了。"""
+    if not values:
+        return frozenset()
+    return frozenset(values)
+
+
 def build(raw) -> Config:
     """從原始 mapping 組出 Config。缺 key 會拋 KeyError，不靜默補預設值。"""
     return Config(
         discord_enabled=raw["discord"]["enabled"],
         quote_retry_attempts=raw["quote"]["retry_attempts"],
         quote_retry_interval_seconds=raw["quote"]["retry_interval_seconds"],
+        calendar_extra_closures=_parse_dates(raw["calendar"]["extra_closures"]),
+        calendar_extra_openings=_parse_dates(raw["calendar"]["extra_openings"]),
     )
 
 

@@ -15,7 +15,14 @@ from dataclasses import dataclass
 from datetime import date
 
 import strategy
-from broker import LoginFailed, OpenPrices, QuoteNotReady
+from broker import (
+    LoginFailed,
+    OpenPrices,
+    ProductListUnavailable,
+    QuoteNotReady,
+    is_settlement_day,
+)
+from calendar_tw import is_trading_day
 from notifiers.discord import build_no_signal_payload, build_signal_payload
 from settings import Config
 
@@ -24,10 +31,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class EntryOutcome:
-    """進場流程的結果。
+    """進場流程的結果。四種結局要分得開：
 
-    `signal` 為 None 代表**無法判斷**（資料拿不到），與「不動作」是兩回事——
-    後者是判斷出來的結果，前者是根本沒判斷。混為一談會讓故障被當成正常。
+    | 結局 | `signal` | `skipped` | `failure` | `exit_code` |
+    |------|----------|-----------|-----------|-------------|
+    | 正常 | LONG / SHORT / NO_TRADE | False | None | 0 |
+    | 無法判斷（資料拿不到） | None | False | 有原因 | 0 |
+    | 非交易日 | None | **True** | None | 0 |
+    | 致命（登入失敗等） | None | False | 有原因 | 1 |
+
+    「不動作」是判斷出來的結果，「無法判斷」是根本沒判斷，「非交易日」是今天不營業——
+    混為一談會讓故障被當成正常的一天。
     """
 
     signal: str | None
@@ -35,6 +49,9 @@ class EntryOutcome:
     notified: bool
     exit_code: int
     failure: str | None = None
+    skipped: bool = False
+    contracts: dict | None = None
+    is_settlement_day: bool = False
 
 
 def _fetch_open_prices(broker, attempts: int, interval: int, sleep, trading_day: int) -> OpenPrices:
@@ -74,6 +91,19 @@ def run_entry(config: Config, today: date, broker, notify, sleep=time.sleep) -> 
             signal=None, opens=None, notified=notified, exit_code=1, failure=reason
         )
 
+    # 非交易日：什麼都不做，連登入都不做。
+    # 「連登入都不做」是刻意的——登入失敗會發告警，而 Discord 的沉默
+    # 只准有一種解釋：今天休市。發任何訊息都會破壞這個約定。
+    if not is_trading_day(
+        today,
+        extra_closures=config.calendar_extra_closures,
+        extra_openings=config.calendar_extra_openings,
+    ):
+        logger.info("%s 非交易日，靜默結束", today)
+        return EntryOutcome(
+            signal=None, opens=None, notified=False, exit_code=0, skipped=True
+        )
+
     try:
         broker.login()
     except LoginFailed as exc:
@@ -84,6 +114,26 @@ def run_entry(config: Config, today: date, broker, notify, sleep=time.sleep) -> 
         # 都不是 LoginFailed。少了它，例外會直接逃出 run_entry 而**一則通知都不發**——
         # 使用者會以為今天只是沒訊號，實際上程式根本沒跑起來。
         return _fatal(f"登入時發生非預期錯誤（{type(exc).__name__}）：{exc}")
+
+    # 近月合約與結算日都來自商品清單，不由日期推算——
+    # 最後交易日遇假日會順延，「每月第三個週三」那條算式抓不到（見 ticket 03）。
+    try:
+        contracts = broker.get_contracts()
+    except ProductListUnavailable as exc:
+        logger.error("取商品清單失敗：%s", exc)
+        notified = _send(build_no_signal_payload(str(exc), today))
+        return EntryOutcome(
+            signal=None, opens=None, notified=notified, exit_code=0, failure=str(exc)
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _fatal(f"取商品清單時發生非預期錯誤（{type(exc).__name__}）：{exc}")
+
+    settlement = any(is_settlement_day(c, today) for c in contracts.values())
+    logger.info(
+        "近月合約 %s%s",
+        {code: c.contract_month for code, c in contracts.items()},
+        "（今天是結算日）" if settlement else "",
+    )
 
     try:
         opens = _fetch_open_prices(
@@ -101,7 +151,8 @@ def run_entry(config: Config, today: date, broker, notify, sleep=time.sleep) -> 
         logger.error("開盤價始終未就緒：%s", exc)
         notified = _send(build_no_signal_payload(str(exc), today))
         return EntryOutcome(
-            signal=None, opens=None, notified=notified, exit_code=0, failure=str(exc)
+            signal=None, opens=None, notified=notified, exit_code=0, failure=str(exc),
+            contracts=contracts, is_settlement_day=settlement,
         )
     except Exception as exc:  # noqa: BLE001
         # 非 QuoteNotReady 的例外不重試——重試 ImportError 三次沒有意義，只是拖時間。
@@ -112,7 +163,10 @@ def run_entry(config: Config, today: date, broker, notify, sleep=time.sleep) -> 
     logger.info("訊號=%s", result.signal)
 
     notified = _send(build_signal_payload(result, today))
-    return EntryOutcome(signal=result.signal, opens=opens, notified=notified, exit_code=0)
+    return EntryOutcome(
+        signal=result.signal, opens=opens, notified=notified, exit_code=0,
+        contracts=contracts, is_settlement_day=settlement,
+    )
 
 
 def main() -> int:

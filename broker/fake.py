@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from broker import OpenPrices
+from broker import ContractInfo, OpenPrices, PRODUCT_CODES
 
 
 class FakeBroker:
@@ -33,13 +33,20 @@ class FakeBroker:
         *,
         script: list | None = None,
         login_error: Exception | None = None,
+        contracts: dict | None = None,
+        contracts_error: Exception | None = None,
     ):
         if script is None:
             script = [OpenPrices(tx=tx, mtx=mtx, tmf=tmf)]
         self._script = list(script)
         self._login_error = login_error
+        self._contracts = contracts if contracts is not None else {
+            code: ContractInfo(code=code, last_trading_day=20260819) for code in PRODUCT_CODES
+        }
+        self._contracts_error = contracts_error
         self.open_price_calls = 0
         self.login_calls = 0
+        self.contract_calls = 0
 
     def login(self) -> None:
         self.login_calls += 1
@@ -52,3 +59,9 @@ class FakeBroker:
         if isinstance(item, Exception):
             raise item
         return item
+
+    def get_contracts(self) -> dict:
+        self.contract_calls += 1
+        if self._contracts_error is not None:
+            raise self._contracts_error
+        return self._contracts

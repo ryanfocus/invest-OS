@@ -125,6 +125,10 @@ class _ExplodingBroker:
         if self._fail_on == "login":
             raise self._error
 
+    def get_contracts(self):
+        from broker import PRODUCT_CODES, ContractInfo
+        return {c: ContractInfo(code=c, last_trading_day=20260819) for c in PRODUCT_CODES}
+
     def get_open_prices(self, expected_trading_day=None):
         self.open_price_calls += 1
         raise self._error

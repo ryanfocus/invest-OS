@@ -28,6 +28,7 @@ def test_orphan_key_is_detected():
     """加一個沒人讀的設定，漂移檢查必須抓到。"""
     raw = {"discord": {"enabled": True},
            "quote": {"retry_attempts": 3, "retry_interval_seconds": 60},
+           "calendar": {"extra_closures": [], "extra_openings": []},
            "unused": {"knob": 1}}
     assert settings_module.consumed_keys(raw) != settings_module.flatten_keys(raw)
 
