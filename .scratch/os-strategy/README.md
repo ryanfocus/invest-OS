@@ -24,8 +24,8 @@
 | # | Ticket | Blocked by | 狀態 |
 |---|--------|-----------|------|
 | 01 | [專案骨架 + 訊號計算 + 假 broker + Discord](issues/01-skeleton-signal-fake-broker-discord.md) | — | ✅ done |
-| 02 | [真實 broker：登入與取得開盤價](issues/02-real-broker-login-and-open-price.md) | 01 | |
-| 03 | [交易日與近月合約判定](issues/03-trading-day-and-front-month.md) | 02 | |
+| 02 | [真實 broker：登入與取得開盤價](issues/02-real-broker-login-and-open-price.md) | 01 | ✅ done |
+| 03 | [交易日與近月合約判定](issues/03-trading-day-and-front-month.md) | 02 | 🟡 待 08/19 驗證 |
 | 04 | [進場下單、狀態檔與開關](issues/04-entry-order-and-position-state.md) | 03 | |
 | 05 | [部位一致性防護](issues/05-position-consistency-guard.md) | 04 | |
 | 06 | [出場流程](issues/06-exit-flow.md) | 05 | |

@@ -10,15 +10,8 @@ from datetime import date
 
 import pytest
 
-from broker import (
-    MTX_CODE,
-    TMF_CODE,
-    TX_CODE,
-    ContractInfo,
-    ProductListUnavailable,
-    is_settlement_day,
-    parse_product_list,
-)
+from broker import MTX_CODE, TMF_CODE, TX_CODE, ContractInfo, ProductListUnavailable
+from broker.capital import parse_product_list
 
 # 實際回傳格式：「%類別碼%類別名%」開頭，接著以「;」分隔的
 # 「商品代碼,名稱,最後交易日,交易所代碼」
@@ -81,17 +74,17 @@ def test_malformed_entries_are_skipped_not_fatal():
 
 def test_settlement_day_is_the_contracts_last_trading_day():
     contract = ContractInfo(code=TX_CODE, last_trading_day=20260819)
-    assert is_settlement_day(contract, date(2026, 8, 19)) is True
+    assert contract.is_settlement_day(date(2026, 8, 19)) is True
 
 
 def test_day_before_settlement_is_not_settlement_day():
     contract = ContractInfo(code=TX_CODE, last_trading_day=20260819)
-    assert is_settlement_day(contract, date(2026, 8, 18)) is False
+    assert contract.is_settlement_day(date(2026, 8, 18)) is False
 
 
 def test_day_after_settlement_is_not_settlement_day():
     contract = ContractInfo(code=TX_CODE, last_trading_day=20260819)
-    assert is_settlement_day(contract, date(2026, 8, 20)) is False
+    assert contract.is_settlement_day(date(2026, 8, 20)) is False
 
 
 def test_settlement_detection_does_not_use_the_third_wednesday_rule():
@@ -101,8 +94,8 @@ def test_settlement_detection_does_not_use_the_third_wednesday_rule():
     若實作偷用日期算式，08/19 會被誤判為結算日、08/20 會被漏掉。
     """
     delayed = ContractInfo(code=TX_CODE, last_trading_day=20260820)
-    assert is_settlement_day(delayed, date(2026, 8, 19)) is False, "第三個週三但不是最後交易日"
-    assert is_settlement_day(delayed, date(2026, 8, 20)) is True, "順延後的最後交易日"
+    assert delayed.is_settlement_day(date(2026, 8, 19)) is False, "第三個週三但不是最後交易日"
+    assert delayed.is_settlement_day(date(2026, 8, 20)) is True, "順延後的最後交易日"
 
 
 def test_settlement_day_uses_the_expiring_contract_not_next_month():
@@ -112,4 +105,4 @@ def test_settlement_day_uses_the_expiring_contract_not_next_month():
     """
     contracts = parse_product_list(REAL_SAMPLE)
     assert contracts[TX_CODE].contract_month == "202608"
-    assert is_settlement_day(contracts[TX_CODE], date(2026, 8, 19)) is True
+    assert contracts[TX_CODE].is_settlement_day(date(2026, 8, 19)) is True

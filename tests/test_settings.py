@@ -87,3 +87,39 @@ def test_retry_interval_is_long_enough_to_be_worth_retrying():
 def test_retry_attempts_is_at_least_two():
     """只試一次就不叫重試了。"""
     assert settings_module.load().quote_retry_attempts >= 2
+
+
+# --- 日期解析（code-review 2026-08-10：加引號會靜默失效）---
+
+
+def test_unquoted_yaml_date_becomes_a_real_date():
+    import datetime
+    parsed = settings_module._parse_dates([datetime.date(2026, 8, 10)])
+    assert parsed == frozenset({datetime.date(2026, 8, 10)})
+
+
+def test_quoted_yaml_date_is_also_accepted():
+    """yaml 的 `- "2026-08-10"` 會是字串。實測過：不處理的話颱風假被靜默無視。"""
+    import datetime
+    parsed = settings_module._parse_dates(["2026-08-10"])
+    assert parsed == frozenset({datetime.date(2026, 8, 10)})
+
+
+def test_datetime_is_narrowed_to_date():
+    import datetime
+    parsed = settings_module._parse_dates([datetime.datetime(2026, 8, 10, 9, 0)])
+    assert parsed == frozenset({datetime.date(2026, 8, 10)})
+
+
+def test_unparseable_date_raises_at_load_time_not_silently():
+    with pytest.raises(ValueError, match="2026/08/10"):
+        settings_module._parse_dates(["2026/08/10"], "calendar.extra_closures")
+
+
+def test_non_date_value_raises():
+    with pytest.raises(ValueError):
+        settings_module._parse_dates([12345], "calendar.extra_closures")
+
+
+def test_empty_list_is_an_empty_set():
+    assert settings_module._parse_dates([]) == frozenset()

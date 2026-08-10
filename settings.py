@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import datetime
 import os
 from dataclasses import dataclass
 
@@ -85,11 +86,36 @@ class _Tracked:
         return value
 
 
-def _parse_dates(values) -> frozenset:
-    """把 yaml 的日期清單轉成 date 集合。yaml 已經幫我們解析成 date 物件了。"""
+def _parse_dates(values, where: str = "") -> frozenset:
+    """把設定的日期清單轉成 `date` 集合。
+
+    ⚠️ **不可以假設 yaml 已經幫我們轉好。** 沒加引號的 `2026-08-10` 會被解析成
+    `date`，加了引號的 `"2026-08-10"` 卻是 `str`——兩者長得一模一樣，但字串永遠
+    不會等於任何 `date`，於是颱風假被靜默無視、程式照常在休市日交易。
+    2026-08-10 實測確認過這個行為。
+
+    所以這裡兩種都收，但**認不得的一律拋錯**——設定錯誤要在載入時就炸，
+    不可以偽裝成執行期的正常行為。
+    """
     if not values:
         return frozenset()
-    return frozenset(values)
+
+    parsed = set()
+    for value in values:
+        if isinstance(value, datetime.datetime):
+            parsed.add(value.date())
+        elif isinstance(value, datetime.date):
+            parsed.add(value)
+        elif isinstance(value, str):
+            try:
+                parsed.add(datetime.date.fromisoformat(value.strip()))
+            except ValueError as exc:
+                raise ValueError(
+                    f"{where} 的日期 {value!r} 格式不正確，應為 YYYY-MM-DD"
+                ) from exc
+        else:
+            raise ValueError(f"{where} 含有無法解析的日期：{value!r}（型別 {type(value).__name__}）")
+    return frozenset(parsed)
 
 
 def build(raw) -> Config:
@@ -98,8 +124,8 @@ def build(raw) -> Config:
         discord_enabled=raw["discord"]["enabled"],
         quote_retry_attempts=raw["quote"]["retry_attempts"],
         quote_retry_interval_seconds=raw["quote"]["retry_interval_seconds"],
-        calendar_extra_closures=_parse_dates(raw["calendar"]["extra_closures"]),
-        calendar_extra_openings=_parse_dates(raw["calendar"]["extra_openings"]),
+        calendar_extra_closures=_parse_dates(raw["calendar"]["extra_closures"], "calendar.extra_closures"),
+        calendar_extra_openings=_parse_dates(raw["calendar"]["extra_openings"], "calendar.extra_openings"),
     )
 
 

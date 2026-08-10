@@ -60,7 +60,7 @@ class FakeBroker:
             raise item
         return item
 
-    def get_contracts(self) -> dict:
+    def get_contracts(self, wait: float = 8.0) -> dict:
         self.contract_calls += 1
         if self._contracts_error is not None:
             raise self._contracts_error

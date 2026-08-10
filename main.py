@@ -20,7 +20,7 @@ from broker import (
     OpenPrices,
     ProductListUnavailable,
     QuoteNotReady,
-    is_settlement_day,
+    to_yyyymmdd,
 )
 from calendar_tw import is_trading_day
 from notifiers.discord import build_no_signal_payload, build_signal_payload
@@ -91,6 +91,18 @@ def run_entry(config: Config, today: date, broker, notify, sleep=time.sleep) -> 
             signal=None, opens=None, notified=notified, exit_code=1, failure=reason
         )
 
+    def _no_signal(reason: str, **extra) -> EntryOutcome:
+        """今天算不出訊號，但不是程式錯誤（報價未就緒、商品清單查不到等）。
+
+        exit_code 為 0——這些是預期內的情況，用錯誤碼會讓排程誤報。
+        """
+        logger.error("無法判斷：%s", reason)
+        notified = _send(build_no_signal_payload(reason, today))
+        return EntryOutcome(
+            signal=None, opens=None, notified=notified, exit_code=0,
+            failure=reason, **extra,
+        )
+
     # 非交易日：什麼都不做，連登入都不做。
     # 「連登入都不做」是刻意的——登入失敗會發告警，而 Discord 的沉默
     # 只准有一種解釋：今天休市。發任何訊息都會破壞這個約定。
@@ -120,15 +132,15 @@ def run_entry(config: Config, today: date, broker, notify, sleep=time.sleep) -> 
     try:
         contracts = broker.get_contracts()
     except ProductListUnavailable as exc:
-        logger.error("取商品清單失敗：%s", exc)
-        notified = _send(build_no_signal_payload(str(exc), today))
-        return EntryOutcome(
-            signal=None, opens=None, notified=notified, exit_code=0, failure=str(exc)
-        )
+        return _no_signal(str(exc))
     except Exception as exc:  # noqa: BLE001
         return _fatal(f"取商品清單時發生非預期錯誤（{type(exc).__name__}）：{exc}")
 
-    settlement = any(is_settlement_day(c, today) for c in contracts.values())
+    settling = {code for code, c in contracts.items() if c.is_settlement_day(today)}
+    settlement = bool(settling)
+    if settling and len(settling) != len(contracts):
+        # 三個台指商品的最後交易日理應相同。不同就是異常，要看得見。
+        logger.warning("只有部分商品到期：%s，仍以結算日處理（提早出場較安全）", sorted(settling))
     logger.info(
         "近月合約 %s%s",
         {code: c.contract_month for code, c in contracts.items()},
@@ -143,17 +155,10 @@ def run_entry(config: Config, today: date, broker, notify, sleep=time.sleep) -> 
             sleep=sleep,
             # 報價必須屬於今天。休市或尚未換日時群益會給上一交易日的價格，
             # 而那看起來完全正常——這是唯一 L1/L2 都攔不住的錯誤。
-            trading_day=int(today.strftime("%Y%m%d")),
+            trading_day=to_yyyymmdd(today),
         )
     except QuoteNotReady as exc:
-        # 拿不到資料是預期內的情況（報價主機、商品下架、颱風），不是程式錯誤，
-        # 所以 exit_code 為 0。但今天沒有訊號，要說清楚是哪個商品出問題。
-        logger.error("開盤價始終未就緒：%s", exc)
-        notified = _send(build_no_signal_payload(str(exc), today))
-        return EntryOutcome(
-            signal=None, opens=None, notified=notified, exit_code=0, failure=str(exc),
-            contracts=contracts, is_settlement_day=settlement,
-        )
+        return _no_signal(str(exc), contracts=contracts, is_settlement_day=settlement)
     except Exception as exc:  # noqa: BLE001
         # 非 QuoteNotReady 的例外不重試——重試 ImportError 三次沒有意義，只是拖時間。
         return _fatal(f"取開盤價時發生非預期錯誤（{type(exc).__name__}）：{exc}")

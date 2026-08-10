@@ -6,7 +6,7 @@
 
 from datetime import date
 
-from broker import ContractInfo, OpenPrices
+from broker import MTX_CODE, TMF_CODE, TX_CODE, ContractInfo, OpenPrices
 from broker.fake import FakeBroker
 from conftest import RecordingNotifier, make_config
 from main import run_entry
@@ -14,9 +14,8 @@ from strategy import LONG
 
 GOOD = OpenPrices(tx=42331, mtx=42298, tmf=42265)
 CONTRACTS = {
-    "TX00AM": ContractInfo(code="TX00AM", last_trading_day=20260819),
-    "MTX00AM": ContractInfo(code="MTX00AM", last_trading_day=20260819),
-    "TM0000AM": ContractInfo(code="TM0000AM", last_trading_day=20260819),
+    code: ContractInfo(code=code, last_trading_day=20260819)
+    for code in (TX_CODE, MTX_CODE, TMF_CODE)
 }
 
 TRADING_DAY = date(2026, 8, 10)      # 週一
@@ -70,7 +69,6 @@ def test_ordinary_trading_day_runs_normally():
     outcome, notifier, broker = _run(TRADING_DAY)
     assert outcome.skipped is False
     assert outcome.signal == LONG
-    assert broker.login_calls == 1
     assert len(notifier.sent) == 1
 
 
@@ -88,7 +86,7 @@ def test_makeup_workday_from_config_makes_a_saturday_trade():
     cfg = make_config(calendar_extra_openings={SATURDAY})
     outcome, _, broker = _run(SATURDAY, cfg=cfg)
     assert outcome.skipped is False
-    assert broker.login_calls == 1
+    assert outcome.signal is not None, "補班日照常算訊號"
 
 
 # --- 近月合約與結算日 ---
@@ -97,7 +95,7 @@ def test_makeup_workday_from_config_makes_a_saturday_trade():
 def test_trading_day_reports_the_front_month_contracts():
     """出場那一班要知道當初交易的是哪個合約，而那筆記錄源自這裡。"""
     outcome, _, _ = _run(TRADING_DAY)
-    assert outcome.contracts["TX00AM"].contract_month == "202608"
+    assert outcome.contracts[TX_CODE].contract_month == "202608"
 
 
 def test_settlement_day_is_flagged_from_the_product_list():

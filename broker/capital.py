@@ -34,7 +34,7 @@ from broker import (
     Quote,
     QuoteNotReady,
     build_open_prices,
-    parse_product_list,
+    ContractInfo,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,36 @@ _MARKET_FUTURES = 2
 _PRICE_SCALE = 100.0
 
 __all__ = ["CapitalBroker"]
+
+
+def parse_product_list(raw: str) -> dict:
+    """解析群益商品清單，取出我們交易的三個商品。
+
+    這是**群益的線路格式**，所以住在這裡而不是 broker 套件的共用契約層——
+    假 broker 直接回傳 ContractInfo，不需要解析任何東西。
+
+    格式：以 `;` 分隔的 `商品代碼,名稱,最後交易日,交易所代碼`，整串還會夾雜
+    `%類別碼%類別名%` 的分類標頭——不剝掉的話第一筆代碼會變成
+    `%201%期指數%TX00AM` 而永遠對不上。標頭可能出現在中段，不只開頭。
+
+    殘缺的列直接跳過（清單裡混雜殘列很正常）；但三個目標商品缺任一個就 raise，
+    因為訊號需要三個價才算得出來，帶著半套資料往下走只會在更遠的地方壞掉。
+    """
+    contracts = {}
+    for entry in raw.replace("\n", ";").split(";"):
+        if entry.startswith("%"):
+            entry = entry.rsplit("%", 1)[-1]
+        fields = entry.split(",")
+        if len(fields) < 3:
+            continue
+        code, last_day = fields[0].strip(), fields[2].strip()
+        if code in PRODUCT_CODES and last_day.isdigit():
+            contracts[code] = ContractInfo(code=code, last_trading_day=int(last_day))
+
+    missing = [c for c in PRODUCT_CODES if c not in contracts]
+    if missing:
+        raise ProductListUnavailable(f"商品清單缺少：{', '.join(missing)}")
+    return contracts
 
 
 def _resolve_dll_path() -> str:
@@ -219,16 +249,21 @@ class CapitalBroker:
         if code != 0:
             raise ProductListUnavailable(f"查詢商品清單失敗，{self._message(code)}")
 
-        # 清單分多次送達，等到三個商品都出現就可以停，不必等完整份
-        def _has_all() -> bool:
-            joined = "".join(self._quote_events.commodity_chunks)
-            return all(c in joined for c in PRODUCT_CODES)
+        # 清單分多次送達。用「解析得出來」當停止條件，而不是「字串裡看得到代碼」——
+        # 後者在分塊邊界剛好切在某一列中間時會誤判成收齊，拿到截斷的資料。
+        parsed: dict = {}
 
-        self._pump_until(_has_all, wait)
-        raw = "".join(self._quote_events.commodity_chunks)
-        if not raw:
-            raise ProductListUnavailable(f"{wait:.0f} 秒內沒收到商品清單")
-        return parse_product_list(raw)
+        def _parsed_ok() -> bool:
+            nonlocal parsed
+            try:
+                parsed = parse_product_list("".join(self._quote_events.commodity_chunks))
+                return True
+            except ProductListUnavailable:
+                return False
+
+        if not self._pump_until(_parsed_ok, wait):
+            raise ProductListUnavailable(f"{wait:.0f} 秒內未取得完整商品清單")
+        return parsed
 
     def get_open_prices(self, expected_trading_day: int | None = None) -> OpenPrices:
         """取三個商品的當日 AM 盤開盤價。

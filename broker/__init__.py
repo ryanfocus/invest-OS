@@ -50,6 +50,11 @@ class ProductListUnavailable(BrokerError):
     """商品清單查不到、或缺少我們要交易的商品。重試可能有幫助。"""
 
 
+def to_yyyymmdd(day) -> int:
+    """`date` → `20260810`。群益的日期欄位都是這個整數格式。"""
+    return int(day.strftime("%Y%m%d"))
+
+
 @dataclass(frozen=True)
 class Quote:
     """單一商品的報價。價格已還原小數（群益回傳為整數且放大 100 倍）。
@@ -93,38 +98,11 @@ class ContractInfo:
         """契約年月（`yyyymm`）。最後交易日必定落在契約月份內，取前六碼即可。"""
         return str(self.last_trading_day)[:6]
 
-
-def parse_product_list(raw: str) -> dict:
-    """解析群益商品清單，取出我們交易的三個商品。
-
-    格式：以 `;` 分隔的 `商品代碼,名稱,最後交易日,交易所代碼`，
-    整串前面還會掛一個 `%類別碼%類別名%` 的分類標頭——不剝掉的話第一筆代碼會變成
-    `%201%期指數%TX00AM` 而永遠對不上。
-
-    殘缺的列直接跳過（清單裡混雜殘列很正常）；但三個目標商品缺任一個就 raise，
-    因為訊號需要三個價才算得出來，帶著半套資料往下走只會在更遠的地方壞掉。
-    """
-    contracts = {}
-    for entry in raw.replace("\n", ";").split(";"):
-        # 剝掉分類標頭：%201%期指數%TX00AM,... → TX00AM,...
-        if entry.startswith("%"):
-            entry = entry.rsplit("%", 1)[-1]
-        fields = entry.split(",")
-        if len(fields) < 3:
-            continue
-        code, last_day = fields[0].strip(), fields[2].strip()
-        if code in PRODUCT_CODES and last_day.isdigit():
-            contracts[code] = ContractInfo(code=code, last_trading_day=int(last_day))
-
-    missing = [c for c in PRODUCT_CODES if c not in contracts]
-    if missing:
-        raise ProductListUnavailable(f"商品清單缺少：{', '.join(missing)}")
-    return contracts
+    def is_settlement_day(self, day) -> bool:
+        """`day` 是不是這個合約的最後交易日（＝結算日）。"""
+        return self.last_trading_day == to_yyyymmdd(day)
 
 
-def is_settlement_day(contract: ContractInfo, day) -> bool:
-    """今天是不是這個合約的最後交易日（＝結算日）。"""
-    return contract.last_trading_day == int(day.strftime("%Y%m%d"))
 
 
 def build_open_prices(quotes: dict, expected_trading_day: int | None = None) -> OpenPrices:

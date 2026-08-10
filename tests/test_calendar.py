@@ -3,7 +3,13 @@
 非交易日執行時程式要完全靜默——不登入、不發訊息。判斷錯了有兩種後果：
 把交易日當成假日 → 整天沒訊號；把假日當成交易日 → 拿到舊資料算出假訊號。
 
-期望值全部來自 `holidays` 套件的 2026 台灣假期表（獨立事實來源），不是我自己數日曆。
+⚠️ **關於期望值的來源**：只斷言**固定日期的法定假日**（1/1、5/1、12/25），
+那些的日期與假日身分都是獨立可知的常識。農曆假日（春節、端午、中秋）的
+西曆日期我只能從 `holidays` 套件查到，拿它當期望值就是用程式碼自己的來源
+驗證程式碼——同義反覆，不會失敗也不證明任何事，所以不寫。
+
+代價是農曆假日沒有測試覆蓋。真正要守住它，期望值得來自期交所的官方休市日曆，
+那是另一件事（可考慮併入 ticket 07 的對帳）。
 """
 
 from datetime import date
@@ -16,22 +22,19 @@ from calendar_tw import is_trading_day
 # --- 一般日 ---
 
 
-@pytest.mark.parametrize("day, label", [
-    (date(2026, 8, 10), "週一"),
-    (date(2026, 8, 11), "週二"),
-    (date(2026, 8, 12), "週三"),
-    (date(2026, 8, 13), "週四"),
-    (date(2026, 8, 14), "週五"),
+@pytest.mark.parametrize("day", [
+    date(2026, 8, 10),
+    date(2026, 8, 11),
+    date(2026, 8, 12),
+    date(2026, 8, 13),
+    date(2026, 8, 14),
 ])
-def test_ordinary_weekdays_are_trading_days(day, label):
+def test_ordinary_weekdays_are_trading_days(day):
     assert is_trading_day(day) is True
 
 
-@pytest.mark.parametrize("day, label", [
-    (date(2026, 8, 8), "週六"),
-    (date(2026, 8, 9), "週日"),
-])
-def test_weekends_are_not_trading_days(day, label):
+@pytest.mark.parametrize("day", [date(2026, 8, 8), date(2026, 8, 9)])
+def test_weekends_are_not_trading_days(day):
     assert is_trading_day(day) is False
 
 
@@ -40,16 +43,11 @@ def test_weekends_are_not_trading_days(day, label):
 
 @pytest.mark.parametrize("day, name", [
     (date(2026, 1, 1), "中華民國開國紀念日"),
-    (date(2026, 2, 16), "農曆除夕"),
-    (date(2026, 2, 17), "春節"),
-    (date(2026, 2, 20), "農曆除夕（補假）"),
-    (date(2026, 4, 6), "民族掃墓節（補假）"),
     (date(2026, 5, 1), "勞動節"),
-    (date(2026, 6, 19), "端午節"),
-    (date(2026, 9, 28), "孔子誕辰紀念日"),
     (date(2026, 12, 25), "行憲紀念日"),
 ])
-def test_public_holidays_are_not_trading_days(day, name):
+def test_fixed_date_statutory_holidays_are_not_trading_days(day, name):
+    """只用固定日期的法定假日——日期與假日身分都不必查套件就知道。"""
     assert is_trading_day(day) is False, f"{day} 是{name}"
 
 
