@@ -31,6 +31,16 @@
 （週六卻開市）與颱風假（平日卻休市），兩種在台灣都真實發生過，invest-hm 就踩過颱風假。
 設定檔的 `calendar.extra_closures` / `extra_openings` 可指定，**兩者同時列出時休市優先**。
 
+**但設定檔不是颱風假的防線，L0 才是。** 公告多半在前一晚或當天清晨才出來，
+要求使用者及時更新設定等於把防護建立在人不會忘記上。真正的機制是：
+期交所沒開市 → 群益繼續給前一交易日的報價 → `nTradingDay` 對不上今天 → 無法判斷、不下單。
+`test_unannounced_closure_produces_no_signal_even_though_the_data_looks_perfect` 守這條。
+
+⚠️ 這條線一度**沒有任何測試守著**：假 broker 收下 `expected_trading_day` 卻不使用，
+所以把 `main.py` 的 `trading_day=to_yyyymmdd(today)` 改成 `None`，107 個測試全數通過。
+已補 `FakeBroker(quotes=...)`（走真正的 `build_open_prices`）與三條端到端測試，
+同一個突變現在會讓 2 個測試變紅。
+
 **非交易日連登入都不做。** 登入失敗會發告警，而 Discord 的沉默只准有一種解釋：
 今天休市。測試斷言 `broker.login_calls == 0`。
 

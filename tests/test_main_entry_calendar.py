@@ -6,7 +6,7 @@
 
 from datetime import date
 
-from broker import MTX_CODE, TMF_CODE, TX_CODE, ContractInfo, OpenPrices
+from broker import MTX_CODE, TMF_CODE, TX_CODE, ContractInfo, OpenPrices, Quote
 from broker.fake import FakeBroker
 from conftest import RecordingNotifier, make_config
 from main import run_entry
@@ -106,3 +106,49 @@ def test_settlement_day_is_flagged_from_the_product_list():
 def test_ordinary_day_is_not_flagged_as_settlement():
     outcome, _, _ = _run(TRADING_DAY)
     assert outcome.is_settlement_day is False
+
+
+# --- 沒有人公告的休市：日曆不知道，資料的日期知道 ---
+#
+# 颱風假的公告在前一晚或當天清晨才出來，設定檔多半來不及更新，
+# 所以「請使用者填 extra_closures」不能當成防護——那只是補救。
+# 真正的防線是：期交所沒開市，群益就繼續給**上一個交易日**的報價，
+# 而那筆報價帶著自己的日期。日期對不上就不判斷、不下單。
+#
+# 這幾條刻意用 `quotes=`（會走真正的 build_open_prices），不用 script=。
+# script= 回的是成品 OpenPrices，證明不了 run_entry 有把今天的日期傳下去。
+
+TYPHOON_DAY = date(2026, 8, 11)      # 週二，日曆看起來完全正常
+PREVIOUS_SESSION = 20260810
+
+STALE_QUOTES = {
+    code: Quote(code=code, open=price, limit_up=48726, limit_down=39868,
+                trading_day=PREVIOUS_SESSION)
+    for code, price in ((TX_CODE, 44987), (MTX_CODE, 45000), (TMF_CODE, 45007))
+}
+
+
+def test_unannounced_closure_produces_no_signal_even_though_the_data_looks_perfect():
+    """颱風假沒填進設定檔時，唯一擋得住的就是報價自己的交易日。
+
+    這組價格非 0、落在漲跌停內、數值合理——L1 與 L2 全部會放行，
+    照樣算得出 SHORT。擋下它的是「這是 08/10 的價格，今天是 08/11」。
+    """
+    outcome, _, _ = _run(TYPHOON_DAY, broker=FakeBroker(quotes=STALE_QUOTES,
+                                                        contracts=CONTRACTS))
+    assert outcome.signal is None, "用上一個交易日的價格算出來的訊號不算數"
+    assert outcome.exit_code == 0, "休市不是程式錯誤"
+
+
+def test_the_same_quotes_are_accepted_on_the_day_they_belong_to():
+    """對照組：資料沒問題，被拒絕的理由確實是日期而不是資料本身。"""
+    outcome, _, _ = _run(date(2026, 8, 10), broker=FakeBroker(quotes=STALE_QUOTES,
+                                                              contracts=CONTRACTS))
+    assert outcome.signal is not None
+
+
+def test_stale_data_reason_reaches_discord_with_both_dates():
+    """使用者要能一眼看出「今天沒開市」，而不是以為程式壞了。"""
+    _, notifier, _ = _run(TYPHOON_DAY, broker=FakeBroker(quotes=STALE_QUOTES,
+                                                         contracts=CONTRACTS))
+    assert "20260810" in notifier.text and "20260811" in notifier.text

@@ -10,19 +10,26 @@
 
 from __future__ import annotations
 
-from broker import ContractInfo, OpenPrices, PRODUCT_CODES
+from broker import ContractInfo, OpenPrices, PRODUCT_CODES, build_open_prices
 
 
 class FakeBroker:
     """回放預先安排的回應。
 
-    兩種用法：
+    三種用法：
 
         FakeBroker(tx=44177, mtx=44142, tmf=44258)   # 每次都回這組
         FakeBroker(script=[QuoteNotReady("..."), OpenPrices(...)])
+        FakeBroker(quotes={TX_CODE: Quote(...), ...})   # 走真正的 L0/L1/L2 檢查
 
     `script` 逐次消耗；用完之後**重複最後一項**，這樣「一直失敗」只要寫一個項目。
     項目是例外就 raise，是 `OpenPrices` 就回傳。
+
+    ⚠️ **`script` 與 `tx/mtx/tmf` 兩種用法會忽略 `expected_trading_day`**——
+    它們回的是成品 `OpenPrices`，沒有日期可比。要驗證新鮮度守衛真的接在流程上，
+    必須用 `quotes=`：那條路會呼叫真正的 `build_open_prices`，跟正式 broker 同一份邏輯。
+    （2026-08-11 突變測試發現：在 `quotes=` 出現以前，把 `main.py` 傳日期那行
+    改成 `None`，全部測試依然通過——假 broker 收下參數卻不用，等於沒有人守這條線。）
     """
 
     def __init__(
@@ -32,13 +39,15 @@ class FakeBroker:
         tmf: float | None = None,
         *,
         script: list | None = None,
+        quotes: dict | None = None,
         login_error: Exception | None = None,
         contracts: dict | None = None,
         contracts_error: Exception | None = None,
     ):
-        if script is None:
+        if script is None and quotes is None:
             script = [OpenPrices(tx=tx, mtx=mtx, tmf=tmf)]
-        self._script = list(script)
+        self._script = list(script) if script is not None else None
+        self._quotes = quotes
         self._login_error = login_error
         self._contracts = contracts if contracts is not None else {
             code: ContractInfo(code=code, last_trading_day=20260819) for code in PRODUCT_CODES
@@ -55,6 +64,9 @@ class FakeBroker:
 
     def get_open_prices(self, expected_trading_day: int | None = None) -> OpenPrices:
         self.open_price_calls += 1
+        if self._quotes is not None:
+            # 走真正的檢查——這是唯一能證明 L0 有接上流程的路徑。
+            return build_open_prices(self._quotes, expected_trading_day=expected_trading_day)
         item = self._script[0] if len(self._script) == 1 else self._script.pop(0)
         if isinstance(item, Exception):
             raise item
