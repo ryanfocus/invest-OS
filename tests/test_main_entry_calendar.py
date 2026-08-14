@@ -6,17 +6,13 @@
 
 from datetime import date
 
-from broker import MTX_CODE, TMF_CODE, TX_CODE, ContractInfo, OpenPrices, Quote
+from broker import MTX_CODE, OpenPrices, Quote, TMF_CODE, TX_CODE
 from broker.fake import FakeBroker
-from conftest import RecordingNotifier, make_config
+from conftest import CONTRACTS, RecordingNotifier, make_config, state_path
 from main import run_entry
 from strategy import LONG
 
 GOOD = OpenPrices(tx=42331, mtx=42298, tmf=42265)
-CONTRACTS = {
-    code: ContractInfo(code=code, last_trading_day=20260819)
-    for code in (TX_CODE, MTX_CODE, TMF_CODE)
-}
 
 TRADING_DAY = date(2026, 8, 10)      # 週一
 SATURDAY = date(2026, 8, 8)
@@ -33,6 +29,7 @@ def _run(today, cfg=None, broker=None):
         broker=broker,
         notify=notifier,
         sleep=lambda _s: None,
+        state_path=state_path(),
     )
     return outcome, notifier, broker
 

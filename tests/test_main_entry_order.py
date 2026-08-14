@@ -11,12 +11,11 @@ from datetime import date
 
 import pytest
 
-from broker import BUY, MTX_CODE, SELL, TMF_CODE, TX_CODE, ContractInfo, OpenPrices
+from broker import BUY, MTX_CODE, OpenPrices, SELL, TMF_CODE, TX_CODE
 from broker.fake import FakeBroker
-from conftest import RecordingNotifier, make_config
+from conftest import CONTRACTS, RecordingNotifier, make_config, state_path
 from main import run_entry
 from state import PositionRecord, read_position, write_position
-from strategy import LONG, NO_TRADE, SHORT
 
 D = date(2026, 8, 10)
 
@@ -27,27 +26,13 @@ SHORT_OPENS = OpenPrices(tx=44987, mtx=45000, tmf=45007)
 # 2026/08/06 實際開盤價：大台夾在中間 → 不動作。
 NO_TRADE_OPENS = OpenPrices(tx=44177, mtx=44142, tmf=44258)
 
-CONTRACTS = {
-    TX_CODE: ContractInfo(code=TX_CODE, last_trading_day=20260819, order_code="TX08"),
-    MTX_CODE: ContractInfo(code=MTX_CODE, last_trading_day=20260819, order_code="MTX08"),
-    TMF_CODE: ContractInfo(code=TMF_CODE, last_trading_day=20260819, order_code="TM2608"),
-}
+@pytest.fixture
+def state_file(isolated_state_file):
+    """本次測試的狀態檔（conftest 的 autouse fixture 已經建好路徑）。"""
+    return isolated_state_file
 
 
-@pytest.fixture(autouse=True)
-def state_file(tmp_path, monkeypatch):
-    """每個測試都用自己的狀態檔。
-
-    autouse 是刻意的：少了它，任何一個開著下單開關的測試都會寫進
-    專案裡真正的 state/position.json，污染開發機的實際部位記錄。
-    """
-    import main
-    path = tmp_path / "position.json"
-    monkeypatch.setattr(main, "STATE_PATH", str(path))
-    return path
-
-
-def _run(opens, cfg=None, broker=None, state_path=None, today=D):
+def _run(opens, cfg=None, broker=None, today=D):
     broker = broker or FakeBroker(script=[opens], contracts=CONTRACTS)
     notifier = RecordingNotifier()
     outcome = run_entry(
@@ -56,7 +41,7 @@ def _run(opens, cfg=None, broker=None, state_path=None, today=D):
         broker=broker,
         notify=notifier,
         sleep=lambda _s: None,
-        state_path=state_path,
+        state_path=state_path(),
     )
     return outcome, notifier, broker
 
@@ -118,15 +103,9 @@ def test_no_order_when_the_quote_never_became_ready():
 
 
 def test_no_order_on_a_non_trading_day():
-    from broker import QuoteNotReady  # noqa: F401  (只為說明非交易日連報價都不取)
+    """非交易日連報價都不取，自然也不會下單。"""
     broker = FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS)
-    run_entry(
-        make_config(auto_order_enabled=True),
-        today=date(2026, 8, 8),          # 週六
-        broker=broker,
-        notify=RecordingNotifier(),
-        sleep=lambda _s: None,
-    )
+    _run(LONG_OPENS, broker=broker, today=date(2026, 8, 8))   # 週六
     assert broker.orders == []
 
 
@@ -154,6 +133,32 @@ def test_order_failure_is_reported_and_not_swallowed():
     assert outcome.exit_code != 0, "送不出去是異常，不可以看起來像正常的一天"
     assert "1038" in notifier.text
     assert len(notifier.sent) == 2, "訊號一則、下單失敗告警一則"
+
+
+def test_order_failure_still_reports_the_signal_that_was_computed():
+    """下單失敗**不等於**無法判斷。
+
+    CONTEXT.md 把 `訊號為 None` 保留給「根本沒算出訊號」。這裡訊號算出來了、
+    也發出去了，只是委託沒送成功——填 None 會讓兩種完全不同的處境撞在一起，
+    對帳與排查時分不出到底發生了什麼事。
+    """
+    from broker import OrderFailed
+    broker = FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS,
+                        order_error=OrderFailed("代碼 1038"))
+    outcome, _, _ = _run(LONG_OPENS, broker=broker)
+    assert outcome.signal == "LONG"
+    assert outcome.opens is not None, "開盤價也是事實，一起留著"
+
+
+def test_order_failure_does_not_claim_a_notification_that_never_happened():
+    """Discord 關閉時 notified 必須是 False，不可以寫死成 True。"""
+    from broker import OrderFailed
+    broker = FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS,
+                        order_error=OrderFailed("代碼 1038"))
+    cfg = make_config(auto_order_enabled=True, discord_enabled=False)
+    outcome, notifier, _ = _run(LONG_OPENS, cfg=cfg, broker=broker)
+    assert notifier.sent == []
+    assert outcome.notified is False
 
 
 def test_order_carries_the_contract_month_from_the_product_list():
@@ -186,6 +191,17 @@ def test_a_filled_order_is_recorded(state_file):
     assert record.side == BUY
     assert record.trading_day == 20260810
     assert record.contract_month == "202608"
+
+
+def test_the_record_carries_the_order_code_end_to_end(state_file):
+    """出場要靠這個欄位送反向委託，所以它必須真的**被寫進去**。
+
+    只驗 `write_position`/`read_position` 的往返證明不了這件事——
+    突變測試確認過：把 main.py 寫入的 order_code 改成空字串，
+    其餘 182 個測試依然全綠。
+    """
+    _run(LONG_OPENS)
+    assert read_position(path=str(state_file)).order_code == "MTX08"
 
 
 def test_the_recorded_lots_come_from_the_fill_not_the_request(state_file):
@@ -229,10 +245,29 @@ def test_running_twice_on_the_same_day_places_only_one_order(state_file):
     assert second.orders == [], "當日已有記錄就不該再下單"
 
 
+def test_a_repeat_run_sends_no_second_discord_message(state_file):
+    """SPEC 進場流程第 2 步：「檢查狀態檔是否已有今日記錄 → 有則跳過」
+    排在登入與發報**之前**。
+
+    放到下單那一步才檢查的話，重跑雖然不會重複下單，卻會再發一則一模一樣的訊號，
+    使用者看到兩則會以為系統出了什麼事。
+    """
+    _run(LONG_OPENS)
+    _, notifier, _ = _run(LONG_OPENS)
+    assert notifier.sent == [], "當日已經跑過，重跑要完全靜默"
+
+
+def test_a_repeat_run_does_not_even_log_in(state_file):
+    """既然決定跳過，就不該再去碰券商——登入失敗會變成一則無謂的告警。"""
+    _run(LONG_OPENS)
+    _, _, broker = _run(LONG_OPENS)
+    assert broker.login_calls == 0
+
+
 def test_yesterdays_record_does_not_block_todays_entry(state_file):
     """昨天的記錄不是今天的部位。擋住今天等於整天不交易。"""
     write_position(
-        PositionRecord(trading_day=20260807, product=MTX_CODE,
+        PositionRecord(trading_day=20260807, product=MTX_CODE, order_code="MTX08",
                        contract_month="202608", side=SELL, lots=1),
         path=str(state_file),
     )

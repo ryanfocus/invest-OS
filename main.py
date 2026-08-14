@@ -95,14 +95,12 @@ def _place_entry_order(
 ):
     """依訊號送出進場委託，成交後寫入狀態檔。
 
-    ⚠️ **這是整個系統唯一會動到錢的地方。** 所有「不下單」的條件都集中在這裡，
-    不散到呼叫端——「什麼情況下會下單」只該有一個地方要讀。
+    ⚠️ **這是整個系統唯一會動到錢的地方。**
 
-    四道關卡，任何一道不通過就完全不碰下單 API：
-      1. 自動下單開關關閉
-      2. 訊號是不動作
-      3. 狀態檔讀不懂（拋 `StateCorrupted`，由呼叫端告警）
-      4. 今天已經進過場（排程重試或人工重跑，不可以變成兩倍部位）
+    兩道關卡在這裡：自動下單開關關閉、訊號是不動作。
+    另外兩道（今天已經進過場、狀態檔讀不懂）在 `run_entry` 的更前面——
+    依 SPEC 的進場流程，重複執行保護是第 2 步，排在登入與發報之前。
+    放到這裡才檢查的話，重跑會再發一則一模一樣的 Discord。
     """
     if not config.auto_order_enabled:
         logger.info("自動下單已關閉，只發訊號")
@@ -111,14 +109,6 @@ def _place_entry_order(
     side = _SIDE_BY_SIGNAL.get(signal)
     if side is None:
         logger.info("訊號為不動作，不送出委託")
-        return None
-
-    # 讀不懂就停手。分不出「確實沒有部位」與「檔案壞了」時下單，
-    # 可能變成加倉或反向新倉——不確定的時候什麼都不做比猜一個安全。
-    existing = read_position(path=state_path)
-    if existing is not None and existing.trading_day == to_yyyymmdd(today):
-        logger.info("今日已有部位記錄（%s %s %d 口），不重複下單",
-                    existing.product, existing.side, existing.lots)
         return None
 
     contract = contracts[config.order_product]
@@ -146,6 +136,7 @@ def _place_entry_order(
         PositionRecord(
             trading_day=to_yyyymmdd(today),
             product=request.product,
+            order_code=request.order_code,     # 出場要用這個送反向委託
             contract_month=request.contract_month,
             side=request.side,
             lots=result.filled_lots,      # 實際成交，不是委託口數
@@ -161,12 +152,17 @@ def run_entry(
     today: date,
     broker,
     notify,
+    *,
     sleep=time.sleep,
-    state_path: str | None = None,
+    state_path: str,
 ) -> EntryOutcome:
     """進場流程：登入 → 取開盤價（含重試）→ 算訊號 → 發報。
 
     `notify` 是一個吃 payload、回傳是否成功的可呼叫物件。
+
+    `state_path` **刻意沒有預設值**。給了預設值的話，忘記傳的測試會靜靜地
+    讀寫專案裡真正的 `state/position.json`——那既會污染開發機的部位記錄，
+    也會讓測試結果取決於那個檔案當下的內容。現在忘記傳就是 TypeError。
     """
 
     def _send(payload) -> bool:
@@ -182,16 +178,21 @@ def run_entry(
             signal=None, opens=None, notified=notified, exit_code=1, failure=reason
         )
 
-    def _order_failed(reason: str) -> EntryOutcome:
+    def _order_failed(reason: str, result, opens, notified: bool, **extra) -> EntryOutcome:
         """訊號算出來也發出去了，但委託沒送成功。
 
-        `signal` 仍然填上——那是事實，今天確實有訊號；
-        `exit_code` 非 0 因為這不是預期內的一天，需要有人去看帳戶。
+        `signal` 與 `opens` **照實填上**——今天確實有訊號，而且已經發出去了。
+        填 None 會與 CONTEXT.md 的「無法判斷」（根本沒算出訊號）撞在一起，
+        那是兩種完全不同的處境。
+
+        `notified` 沿用訊號那一則的實際結果，不寫死——Discord 關閉時它是 False。
+        `exit_code` 非 0，因為這不是預期內的一天，需要有人去看帳戶。
         """
         logger.error("%s", reason)
         _send(build_order_failed_payload(reason, today))
         return EntryOutcome(
-            signal=None, opens=None, notified=True, exit_code=1, failure=reason
+            signal=result.signal, opens=opens, notified=notified,
+            exit_code=1, failure=reason, **extra,
         )
 
     def _no_signal(reason: str, **extra) -> EntryOutcome:
@@ -215,6 +216,24 @@ def run_entry(
         extra_openings=config.calendar_extra_openings,
     ):
         logger.info("%s 非交易日，靜默結束", today)
+        return EntryOutcome(
+            signal=None, opens=None, notified=False, exit_code=0, skipped=True
+        )
+
+    # SPEC 進場流程第 2 步：重複執行保護，排在登入與發報**之前**。
+    # 放到下單那一步才檢查的話，重跑不會重複下單，卻會再發一則一模一樣的訊號。
+    #
+    # 讀壞掉時不在這裡爆——訊號本身還是算得出來也值得發，
+    # 只是不能下單。留到第 7 步再處理（見下方 state_error）。
+    try:
+        existing = read_position(path=state_path)
+        state_error = ""
+    except StateCorrupted as exc:
+        existing, state_error = None, str(exc)
+
+    if existing is not None and existing.trading_day == to_yyyymmdd(today):
+        logger.info("今日已有部位記錄（%s %s %d 口），跳過",
+                    existing.product, existing.side, existing.lots)
         return EntryOutcome(
             signal=None, opens=None, notified=False, exit_code=0, skipped=True
         )
@@ -273,23 +292,27 @@ def run_entry(
     # 發報在下單**之前**。訊號是這個系統的主要產出，下單是附加的；
     # 下單那一步失敗時，使用者至少已經收到今天該做什麼。
     notified = _send(build_signal_payload(result, today))
+    failed = lambda reason: _order_failed(  # noqa: E731
+        reason, result=result, opens=opens, notified=notified,
+        contracts=contracts, is_settlement_day=settlement,
+    )
+
+    if state_error:
+        # 讀不懂就不知道帳上有沒有部位，這時候下單可能變成加倉或反向新倉。
+        # 不確定的時候什麼都不做，比猜一個好。
+        return failed(f"狀態檔異常，未下單：{state_error}")
 
     try:
         _place_entry_order(
             config, broker, result.signal, contracts,
-            today=today,
-            # 模組層級的 STATE_PATH 在這裡取值（而不是預設參數），
-            # 測試才能用 monkeypatch 換掉它，不會寫到真正的狀態檔。
-            state_path=state_path or STATE_PATH,
+            today=today, state_path=state_path,
         )
-    except StateCorrupted as exc:
-        return _order_failed(f"狀態檔異常，未下單：{exc}")
     except OrderFailed as exc:
-        return _order_failed(f"委託送出失敗：{exc}")
+        return failed(f"委託送出失敗：{exc}")
     except Exception as exc:  # noqa: BLE001
         # 與登入那一段同樣的理由：COM 壞掉時拋的不是 OrderFailed，
         # 少了這一條，例外會逃出去而使用者只看到訊號、以為單下好了。
-        return _order_failed(f"下單時發生非預期錯誤（{type(exc).__name__}）：{exc}")
+        return failed(f"下單時發生非預期錯誤（{type(exc).__name__}）：{exc}")
 
     return EntryOutcome(
         signal=result.signal, opens=opens, notified=notified, exit_code=0,
@@ -343,6 +366,7 @@ def main() -> int:
             account=account,
         ),
         notify=lambda payload: send(payload, webhook),
+        state_path=STATE_PATH,
     )
     logger.info("結束：訊號=%s exit_code=%s", outcome.signal, outcome.exit_code)
     return outcome.exit_code

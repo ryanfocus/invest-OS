@@ -1,12 +1,12 @@
 """進場流程 —— 從最上層打進去，斷言外部可觀察的效果。
 
-這裡不測內部 helper。可觀察的效果目前有一種：**產生的 Discord 訊息**。
-（送出的委託、寫入的狀態檔會在後續 ticket 加入。）
+這裡不測內部 helper。可觀察的效果有兩種：**產生的 Discord 訊息**與
+**送出的委託**；後者由 test_main_entry_order.py 專責，這裡只看發報。
 """
 
 from datetime import date
 
-from conftest import RecordingNotifier, make_config
+from conftest import RecordingNotifier, make_config, state_path
 from broker.fake import FakeBroker
 from main import run_entry
 from strategy import LONG, NO_TRADE, SHORT
@@ -21,6 +21,7 @@ def _run(tx, mtx, tmf, cfg=None, notifier=None):
         today=D,
         broker=FakeBroker(tx=tx, mtx=mtx, tmf=tmf),
         notify=notifier,
+        state_path=state_path(),
     )
     return outcome, notifier
 

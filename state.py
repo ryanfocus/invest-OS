@@ -43,12 +43,23 @@ class PositionRecord:
     """
 
     trading_day: int          # yyyymmdd
-    product: str              # 報價代碼
+    product: str              # 報價代碼（對帳用）
+    # 下單代碼（MTX08）。**出場要靠它**：委託帶的是這個，不是報價代碼。
+    # 不存的話出場得重查商品清單再推導一次，而近月連續代碼在結算之後
+    # 就指向次月了——隔夜殘留的部位一重推就會拿到錯的合約，
+    # 「平倉」單於是變成開一個新部位。進場時已經知道，不該讓出場再猜。
+    order_code: str
     contract_month: str       # yyyymm
     side: str                 # BUY / SELL（進場方向）
     lots: int                 # 實際成交口數
     order_seq: str = ""
-    exited: bool = False
+
+    def __post_init__(self) -> None:
+        """殘缺的記錄比沒有記錄更糟——出場那一班會拿著它去下單。"""
+        if not self.order_code:
+            raise ValueError(f"{self.product} 的部位記錄缺少下單代碼，出場時無法送出委託")
+        if self.lots < 1:
+            raise ValueError(f"部位口數必須 ≥ 1，目前是 {self.lots}（0 口不是部位）")
 
 
 def read_position(path: str = STATE_PATH) -> PositionRecord | None:

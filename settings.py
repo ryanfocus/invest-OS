@@ -24,6 +24,13 @@ _ENV_PATH = os.path.join(_ROOT, ".env")
 
 ENVIRONMENTS = ("production", "test")
 
+# 欄位名 → 設定檔裡的 key。錯誤訊息要講使用者看得到的那個名字，
+# 不是程式內部的欄位名——他要去編輯的是 yaml。
+_YAML_KEYS = {
+    "auto_order_enabled": "order.auto_enabled",
+    "discord_enabled": "discord.enabled",
+}
+
 
 @dataclass(frozen=True)
 class Config:
@@ -47,6 +54,18 @@ class Config:
         兩條路都要被擋住，否則守不住的那條遲早會被用上。
         """
         from broker import PRODUCT_CODES
+
+        # ⚠️ 開關必須是真正的布林值。yaml 的 `auto_enabled: "false"` 會解析成
+        #    字串 "false"，而非空字串一律為真——使用者以為開關關著，程式卻照常
+        #    送出真單。與 ticket 03 那個「加引號的日期被靜默無視」同一類錯誤，
+        #    但這個方向的代價大得多。
+        for name in ("auto_order_enabled", "discord_enabled"):
+            value = getattr(self, name)
+            if not isinstance(value, bool):
+                raise ValueError(
+                    f"{_YAML_KEYS[name]} 必須是 true 或 false（不加引號），"
+                    f"目前是 {value!r}（型別 {type(value).__name__}）"
+                )
 
         if self.quote_retry_attempts < 1:
             raise ValueError(

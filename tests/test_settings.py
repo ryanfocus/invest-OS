@@ -8,6 +8,7 @@ invest-hm 踩過的教訓：settings.yaml 加了 key 但程式沒讀，或程式
 import pytest
 
 import settings as settings_module
+from conftest import make_config as _config
 
 
 def test_settings_yaml_loads():
@@ -163,12 +164,32 @@ def test_unknown_product_is_rejected_at_load_time():
         _config(order_product="TX00")     # 少了 AM，是全盤代碼
 
 
+def test_a_quoted_false_does_not_arm_the_switch():
+    """**yaml 的 `auto_enabled: "false"` 是字串，而非空字串一律為真。**
+
+    與 ticket 03 那個「加引號的日期被靜默無視」是同一類錯誤，但方向相反、代價更大：
+    那次是該做的事沒做，這次是**不該下單的時候下單**。
+    使用者以為自己把開關關著，程式卻照常送出真單。
+    """
+    with pytest.raises(ValueError, match="auto_enabled"):
+        _config(auto_order_enabled="false")
+
+
+def test_a_quoted_true_is_also_rejected_rather_than_quietly_accepted():
+    """「剛好會動」比「明確失敗」更糟——它會讓人以為字串是合法寫法。"""
+    with pytest.raises(ValueError, match="auto_enabled"):
+        _config(auto_order_enabled="true")
+
+
+def test_discord_switch_is_type_checked_too():
+    """同一類錯誤，同一個防線。"""
+    with pytest.raises(ValueError, match="enabled"):
+        _config(discord_enabled="false")
+
+
 def test_unknown_environment_is_rejected_at_load_time():
     """環境只有正式與測試兩種。拼錯時絕不可以「猜一個」——猜錯就是真錢。"""
     with pytest.raises(ValueError, match="environment"):
         _config(capital_environment="prod")
 
 
-def _config(**overrides):
-    from conftest import make_config
-    return make_config(**overrides)

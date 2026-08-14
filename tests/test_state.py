@@ -23,6 +23,7 @@ from state import PositionRecord, StateCorrupted, read_position, write_position
 RECORD = PositionRecord(
     trading_day=20260810,
     product=MTX_CODE,
+    order_code="MTX08",
     contract_month="202608",
     side=BUY,
     lots=2,
@@ -45,12 +46,24 @@ def test_absent_file_means_no_position(tmp_path):
     assert read_position(path=str(tmp_path / "nothing.json")) is None
 
 
+def test_the_record_carries_the_order_code_the_exit_will_need(tmp_path):
+    """出場要送反向委託，而委託帶的是**下單代碼**（MTX08），不是報價代碼。
+
+    不存的話，出場那一班只能重新查商品清單再推導一次。而近月連續代碼
+    在結算之後就指向次月了——隔夜殘留的部位若在那時重推，會拿到次月合約，
+    「平倉」單就變成開一個新部位。進場時已經知道答案，就不該讓出場再猜一次。
+    """
+    path = tmp_path / "position.json"
+    write_position(RECORD, path=str(path))
+    assert read_position(path=str(path)).order_code == "MTX08"
+
+
 def test_the_recorded_lots_are_the_filled_lots_not_the_requested_ones(tmp_path):
     """市價 IOC 可能部分成交。出場要平的是**實際持有**的量。"""
     path = tmp_path / "position.json"
     partial = PositionRecord(
-        trading_day=20260810, product=MTX_CODE, contract_month="202608",
-        side=SELL, lots=1, order_seq="SEQ2",     # 委託 3 口、只成交 1 口
+        trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+        contract_month="202608", side=SELL, lots=1, order_seq="SEQ2",   # 委託 3 口、只成交 1 口
     )
     write_position(partial, path=str(path))
     assert read_position(path=str(path)).lots == 1
@@ -95,8 +108,8 @@ def test_an_interrupted_write_leaves_the_previous_record_intact(tmp_path, monkey
 
     monkeypatch.setattr(os, "replace", _boom)
     newer = PositionRecord(
-        trading_day=20260811, product=MTX_CODE, contract_month="202609",
-        side=SELL, lots=9, order_seq="SEQ_NEW",
+        trading_day=20260811, product=MTX_CODE, order_code="MTX09",
+        contract_month="202609", side=SELL, lots=9, order_seq="SEQ_NEW",
     )
     with pytest.raises(OSError):
         write_position(newer, path=str(path))

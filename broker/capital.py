@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import time
 import winreg
+from dataclasses import dataclass
 
 from broker import (
     BUY,
@@ -68,10 +69,9 @@ _MARKET_PRICE = "M"        # bstrPrice：「M」市價、「P」範圍市價；�
 
 # 倉別 sNewClose：0 新倉、1 平倉、2 自動。
 # ⚠️ **尚未實機驗證**（ticket 04 最後一條）。台指期同帳號同商品同月份是淨額計算，
-#    在已有反向部位時用「新倉」可能被拒或產生非預期結果，用「自動」則由券商判斷。
-#    在測試環境實打確認之前，不可開啟自動下單。
+#    在已有反向部位時用「新倉」可能被拒或產生非預期結果；若實測如此，改用 2（自動）
+#    由券商判斷。在測試環境實打確認之前，不可開啟自動下單。
 _NEW_CLOSE_NEW = 0
-_NEW_CLOSE_AUTO = 2
 
 # OnNewData 的欄位位置。⚠️ 由官方文件的欄位排列推導，尚未實機驗證，
 # 所以 parse_reply_row 不信任索引而是驗證形狀（詳見該函式）。
@@ -216,7 +216,77 @@ class _ReplyEvents:
         pass
 
 
-def parse_reply_row(row: str) -> dict | None:
+@dataclass(frozen=True)
+class ReplyRow:
+    """一列已經看懂的委託回報。"""
+
+    seq: str
+    type: str
+    failed: bool
+    qty: int
+
+
+@dataclass(frozen=True)
+class FillSummary:
+    """一筆委託的成交結果。
+
+    `matched_rows` 是「認出幾列屬於這筆委託」。它與 `filled_lots == 0` 合起來
+    才分得出三種完全不同的處境：
+
+      matched_rows > 0, filled > 0  → 成交了，記進狀態檔
+      matched_rows > 0, filled == 0 → 確實沒成交（IOC 沒對手價，或被拒）
+      matched_rows == 0             → **不知道**。回報還沒到，或認不出是哪一筆。
+                                       委託可能已經成交，絕不可以當成「沒有部位」。
+    """
+
+    filled_lots: int
+    rejected: bool
+    matched_rows: int
+    reject_reason: str = ""
+
+
+def summarize_fills(rows, seq: str) -> FillSummary:
+    """彙整同一筆委託的回報，算出實際成交口數。
+
+    三條規則，都是不對稱的——因為代價不對稱：
+
+    1. **只要有成交就不算失敗。** 市價 IOC 的正常結局就是「成交一部分、
+       剩下的取消」，取消列可能在成交列之後才到。把它當成失敗而不寫狀態檔的話，
+       已成交的部位就沒有人知道，13:40 不會去平，直接進夜盤。
+    2. **完全沒成交才談失敗。** 那時候確實沒有部位產生。
+    3. **認不出是哪一筆就一列都不算。** 回報事件是共用的：手動下的單、
+       連線時沖進來的前一批回報都在同一個緩衝區裡。加總到別人的成交上，
+       下午就會平錯口數，多出來的部分變成反向新倉。
+
+    比對委託序號用**整列子字串搜尋**而不是特定欄位——欄位位置本身還沒實機驗證，
+    而 13 碼序號夠獨特，出現在哪一欄都認得出來。
+    """
+    filled = 0
+    matched = 0
+    reject_reason = ""
+
+    for row in rows:
+        parsed = parse_reply_row(row)
+        if parsed is None:
+            continue
+        if seq and seq not in row:
+            continue
+        matched += 1
+        if parsed.failed and not reject_reason:
+            reject_reason = row
+        if parsed.type == _REPLY_FILLED:
+            filled += parsed.qty
+
+    return FillSummary(
+        filled_lots=filled,
+        # 有成交就不是失敗——剩餘量被取消是 IOC 的常態，不是錯誤
+        rejected=bool(reject_reason) and filled == 0,
+        matched_rows=matched,
+        reject_reason=reject_reason if filled == 0 else "",
+    )
+
+
+def parse_reply_row(row: str) -> ReplyRow | None:
     """解析一列 `OnNewData` 回報。看不懂就回 `None`（不是我們的單、或格式不符）。
 
     ⚠️ **欄位位置是從官方文件的欄位排列推導出來的，尚未實機驗證。**
@@ -240,12 +310,12 @@ def parse_reply_row(row: str) -> dict | None:
     if not qty.isdigit():
         return None
 
-    return {
-        "seq": fields[_REPLY_KEYNO].strip() or fields[-1].strip(),
-        "type": row_type,
-        "failed": fields[_REPLY_ERR].strip() == "Y",
-        "qty": int(qty),
-    }
+    return ReplyRow(
+        seq=fields[_REPLY_KEYNO].strip() or fields[-1].strip(),
+        type=row_type,
+        failed=fields[_REPLY_ERR].strip() == "Y",
+        qty=int(qty),
+    )
 
 
 class _CenterEvents:
@@ -501,37 +571,29 @@ class CapitalBroker:
         return self._await_fill(seq=str(message), since=before)
 
     def _await_fill(self, seq: str, since: int) -> OrderResult:
-        """等成交回報，把同一筆委託的成交量加總。
+        """等回報到齊，回傳實際成交口數。彙整規則見 `summarize_fills`。"""
 
-        市價 IOC 可能分批成交，也可能部分成交後產生取消單——所以是加總 `D`（成交）
-        那幾列，不是取第一列。
-        """
-        def _has_terminal_row() -> bool:
-            return any(
-                (parsed := parse_reply_row(row)) and parsed["type"] == _REPLY_FILLED
-                for row in self._reply_events.rows[since:]
-            )
+        def _summary() -> FillSummary:
+            return summarize_fills(self._reply_events.rows[since:], seq)
 
-        self._pump_until(_has_terminal_row, self._fill_timeout)
+        # 等到認出至少一列屬於這筆委託為止
+        self._pump_until(lambda: _summary().matched_rows > 0, self._fill_timeout)
+        summary = _summary()
 
-        filled = 0
-        seen_any = False
-        for row in self._reply_events.rows[since:]:
-            parsed = parse_reply_row(row)
-            if parsed is None:
-                continue
-            seen_any = True
-            if parsed["failed"]:
-                raise OrderFailed(f"委託被拒：{row}")
-            if parsed["type"] == _REPLY_FILLED:
-                filled += parsed["qty"]
-
-        if not seen_any:
+        if summary.matched_rows == 0:
+            # ⚠️ 這**不等於**沒有成交，只是回報沒到。用 OrderFailed 表達其實不精確
+            #    （那個例外的意思是「確定沒有部位產生」），但在 ticket 05 把
+            #    「不確定」狀態做出來之前，停手並要求人工確認是唯一安全的行為。
             raise OrderFailed(
-                f"{self._fill_timeout:.0f} 秒內未收到任何可解析的回報（委託序號 {seq}）。"
-                "委託可能已成交但回報未到——請人工確認帳戶部位。"
+                f"{self._fill_timeout:.0f} 秒內未收到委託 {seq} 的回報。"
+                "**委託可能已經成交**，請立刻人工確認帳戶部位。"
             )
-        return OrderResult(filled_lots=filled, order_seq=seq)
+        if summary.rejected:
+            raise OrderFailed(f"委託被拒且無成交：{summary.reject_reason}")
+
+        if summary.filled_lots == 0:
+            logger.warning("委託 %s 未成交（市價 IOC 當下沒有對手價）", seq)
+        return OrderResult(filled_lots=summary.filled_lots, order_seq=seq)
 
     def get_open_prices(self, expected_trading_day: int | None = None) -> OpenPrices:
         """取三個商品的當日 AM 盤開盤價。

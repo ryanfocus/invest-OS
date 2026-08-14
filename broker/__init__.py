@@ -139,6 +139,18 @@ class OrderRequest:
     side: str               # BUY / SELL
     lots: int
 
+    def __post_init__(self) -> None:
+        """空的下單代碼絕不可以送到券商。
+
+        `ContractInfo.order_code` 有預設空字串（不在乎下單的情境用得到），
+        所以空值有可能一路流到這裡。在委託物件這一層擋住——
+        送出去只會拿到一個看不出原因的拒絕訊息。
+        """
+        if not self.order_code:
+            raise ValueError(f"{self.product} 沒有下單代碼，無法送出委託")
+        if self.lots < 1:
+            raise ValueError(f"委託口數必須 ≥ 1，目前是 {self.lots}")
+
 
 @dataclass(frozen=True)
 class OrderResult:

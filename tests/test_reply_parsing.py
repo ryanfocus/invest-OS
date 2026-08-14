@@ -38,14 +38,14 @@ def _row(**overrides):
 
 def test_a_futures_fill_row_is_parsed():
     parsed = parse_reply_row(_row())
-    assert parsed["type"] == "D"
-    assert parsed["qty"] == 2
-    assert parsed["failed"] is False
+    assert parsed.type == "D"
+    assert parsed.qty == 2
+    assert parsed.failed is False
 
 
 def test_a_rejected_order_is_flagged():
     """OrderErr = Y 代表這筆委託失敗，不可以被當成成交。"""
-    assert parse_reply_row(_row(**{"3": "Y"}))["failed"] is True
+    assert parse_reply_row(_row(**{"3": "Y"})).failed is True
 
 
 # --- 看不懂就回 None，絕不猜 ---
