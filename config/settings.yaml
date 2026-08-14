@@ -19,10 +19,17 @@ quote:
   retry_interval_seconds: 60
 
 capital:
-  # 群益連線環境。production=正式環境、test=測試環境（SKCenterLib_SetAuthority）。
+  # 群益連線環境。production 時**完全不呼叫** SKCenterLib_SetAuthority
+  # （不呼叫就是正式環境，那是它的預設值）。
   #
-  # ⚠️ 沒有預設值，拼錯會在載入時就報錯——不會「猜一個」，因為猜錯就是真錢。
-  #    要驗證倉別參數（sNewClose）時才改成 test，且**不要把 test 進版控**。
+  # ⚠️ **test 不是一般帳戶的模擬環境，不要把它當成安全網。**
+  #    官方文件對 SetAuthority 的說明是「(SGX 專線only)…一般客戶可忽略此部分」，
+  #    而 SGX 專線要另向營業員申請。範例程式雖然把 flag 2 標成「測試環境」，
+  #    但那是 SGX 專線的測試環境。設成 test 很可能只是無效——
+  #    而「以為切到測試環境所以很安全」比根本不切更危險。
+  #
+  #    要驗證倉別參數，目前唯一可靠的方法是**在正式環境用 1 口微台實打**
+  #    （微台每點 10 元，是所有台指商品裡最小的單位）。
   environment: production
 
 order:
