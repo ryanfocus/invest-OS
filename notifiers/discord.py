@@ -50,6 +50,21 @@ def build_no_signal_payload(reason: str, trading_date: date) -> dict:
     return {"content": "\n".join(lines)}
 
 
+def build_order_failed_payload(reason: str, trading_date: date) -> dict:
+    """委託送不出去時的告警。純函式，無 I/O。
+
+    與「今日無訊號」是不同的事：訊號有算出來也發出去了，是**下單那一步**失敗。
+    使用者看到這則的正確反應是「去看一下帳戶」，看到無訊號的正確反應是「今天沒事」。
+    """
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "🚨 下單失敗",
+        f"原因：{reason}",
+        "訊號已發出，但委託沒有送出去，請確認帳戶部位。",
+    ]
+    return {"content": "\n".join(lines)}
+
+
 def send(payload: dict, webhook_url: str, timeout=(5, 10)) -> bool:
     """送出 payload。回傳是否成功。
 

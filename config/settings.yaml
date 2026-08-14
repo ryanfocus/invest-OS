@@ -18,6 +18,28 @@ quote:
   retry_attempts: 3
   retry_interval_seconds: 60
 
+capital:
+  # 群益連線環境。production=正式環境、test=測試環境（SKCenterLib_SetAuthority）。
+  #
+  # ⚠️ 沒有預設值，拼錯會在載入時就報錯——不會「猜一個」，因為猜錯就是真錢。
+  #    要驗證倉別參數（sNewClose）時才改成 test，且**不要把 test 進版控**。
+  environment: production
+
+order:
+  # 自動下單總開關。
+  #
+  # ⚠️ **關閉時程式完全不呼叫下單 API**，只算訊號、發 Discord。
+  #    測試 test_shipped_config_has_auto_ordering_switched_off 會擋住
+  #    「不小心把開著的設定 commit 上來」。要開之前，先確認：
+  #      1. nOpen 在 08:50 與期交所一致（目前未解，見 tools/compare_open.py）
+  #      2. 倉別參數 sNewClose 已在測試環境實打驗證（ticket 04 最後一條）
+  auto_enabled: false
+
+  # 交易標的：TX00AM=大台、MTX00AM=小台、TM0000AM=微台。
+  # 程式不檢查槓桿或保證金，口數多少就送多少。
+  product: MTX00AM
+  lots: 1
+
 calendar:
   # holidays 套件只知道國定假日，不知道這兩種台灣特有的情況。
   # 格式為 YYYY-MM-DD（yaml 會自動解析成日期），兩邊同時列出時**休市優先**。

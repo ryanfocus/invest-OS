@@ -50,6 +50,20 @@ class ProductListUnavailable(BrokerError):
     """商品清單查不到、或缺少我們要交易的商品。重試可能有幫助。"""
 
 
+class OrderFailed(BrokerError):
+    """委託沒有送出去（被拒絕、連線斷、參數錯）。
+
+    ⚠️ 與「送出了但不知道成交幾口」是**完全不同的狀況**，後者屬於 ticket 05。
+    這個例外只在確定沒有部位產生時使用——分不清楚就不可以用它。
+    """
+
+
+# 委託買賣別。刻意不用群益的 0/1：那兩個數字在程式碼裡看不出誰是誰，
+# 而寫反的後果是開出完全相反的部位。轉成群益格式的工作留在 broker.capital。
+BUY = "BUY"
+SELL = "SELL"
+
+
 def to_yyyymmdd(day) -> int:
     """`date` → `20260810`。群益的日期欄位都是這個整數格式。"""
     return int(day.strftime("%Y%m%d"))
@@ -90,8 +104,13 @@ class ContractInfo:
     那時合約已停止交易，單送不出去（見 ADR-0003 與 SPEC 的結算日章節）。
     """
 
-    code: str
+    code: str                  # 報價代碼（近月連續，如 TX00AM）
     last_trading_day: int      # yyyymmdd
+    # 下單代碼（指名月份，如 TX08）。**與報價代碼是兩回事**：群益官方文件在
+    # SendFutureOrderCLR 的備註寫明委託要帶月份代碼，而近月連續代碼能不能下單
+    # 沒有任何文件保證。三個商品的格式還互不相同（TX08／MTX08／TM2608），
+    # 所以只能從商品清單讀出來，不可以自己組字串。
+    order_code: str = ""
 
     @property
     def contract_month(self) -> str:
@@ -103,6 +122,34 @@ class ContractInfo:
         return self.last_trading_day == to_yyyymmdd(day)
 
 
+
+
+@dataclass(frozen=True)
+class OrderRequest:
+    """一筆進場或出場委託。
+
+    `contract_month` 一定要填。群益的商品代碼帶月份時，若該月已過期會**自動改送
+    隔年同月**（官方文件明載於 SendFutureOrderCLR 的備註），指名年月才擋得住。
+    年月的唯一可信來源是商品清單（見 ticket 03），不是由日期推算。
+    """
+
+    product: str            # 報價代碼（PRODUCT_CODES 之一），狀態檔與對帳用
+    order_code: str         # 下單代碼（TX08 等），送給券商的就是這個
+    contract_month: str     # yyyymm
+    side: str               # BUY / SELL
+    lots: int
+
+
+@dataclass(frozen=True)
+class OrderResult:
+    """委託結果。
+
+    `filled_lots` 是**實際成交口數**，不是委託口數——市價 IOC 可能部分成交，
+    而下午出場要平的是實際持有的量。兩者混用會平錯口數。
+    """
+
+    filled_lots: int
+    order_seq: str = ""     # 群益的 13 碼委託序號，供對帳與人工查詢
 
 
 def build_open_prices(quotes: dict, expected_trading_day: int | None = None) -> OpenPrices:

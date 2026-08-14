@@ -25,11 +25,13 @@ def test_no_orphan_settings_and_no_phantom_reads():
 
 
 def test_orphan_key_is_detected():
-    """加一個沒人讀的設定，漂移檢查必須抓到。"""
-    raw = {"discord": {"enabled": True},
-           "quote": {"retry_attempts": 3, "retry_interval_seconds": 60},
-           "calendar": {"extra_closures": [], "extra_openings": []},
-           "unused": {"knob": 1}}
+    """加一個沒人讀的設定，漂移檢查必須抓到。
+
+    刻意從真實設定檔長出來，而不是手寫一份：手寫的那份每次加設定項都要跟著改，
+    忘了改就變成「測試在驗一個已經不存在的設定形狀」。
+    """
+    raw = settings_module.read_raw()
+    raw["unused"] = {"knob": 1}
     assert settings_module.consumed_keys(raw) != settings_module.flatten_keys(raw)
 
 
@@ -123,3 +125,50 @@ def test_non_date_value_raises():
 
 def test_empty_list_is_an_empty_set():
     assert settings_module._parse_dates([]) == frozenset()
+
+
+# --- 下單設定（ticket 04）---
+#
+# 這一組的期望值來自 SPEC 與 ticket 04 的驗收條件，不是從程式反推的。
+
+
+def test_shipped_config_has_auto_ordering_switched_off():
+    """**進版控的設定檔必須是未武裝狀態。**
+
+    這條守的不是程式邏輯而是 repo 的狀態：任何人不小心把開著的設定 commit 上來，
+    這裡就會紅。ticket 04 的第一條驗收條件（「預設為關閉」）真正的意思就是這個——
+    程式碼裡的 fallback 值保護不了任何人，設定檔的實際內容才會。
+    """
+    assert settings_module.load().auto_order_enabled is False
+
+
+def test_shipped_config_points_at_the_production_environment():
+    """報價必須是真的，所以連線環境是正式環境。
+
+    這與上一條合起來才是安全的組合：正式環境 + 下單關閉 = 只發訊號不下單。
+    要驗倉別參數時改成 test，但那個狀態不該進版控。
+    """
+    assert settings_module.load().capital_environment == "production"
+
+
+def test_lot_size_below_one_is_rejected_at_load_time():
+    """0 口的委託送出去只會拿到看不懂的錯誤，不如在載入時就講清楚。"""
+    with pytest.raises(ValueError, match="lots"):
+        _config(order_lots=0)
+
+
+def test_unknown_product_is_rejected_at_load_time():
+    """打錯商品代碼會下到別的東西上——這是必須在載入時就攔下的錯誤。"""
+    with pytest.raises(ValueError, match="product"):
+        _config(order_product="TX00")     # 少了 AM，是全盤代碼
+
+
+def test_unknown_environment_is_rejected_at_load_time():
+    """環境只有正式與測試兩種。拼錯時絕不可以「猜一個」——猜錯就是真錢。"""
+    with pytest.raises(ValueError, match="environment"):
+        _config(capital_environment="prod")
+
+
+def _config(**overrides):
+    from conftest import make_config
+    return make_config(**overrides)

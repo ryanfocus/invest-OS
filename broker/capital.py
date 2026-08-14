@@ -27,14 +27,18 @@ import time
 import winreg
 
 from broker import (
+    BUY,
     PRODUCT_CODES,
+    ContractInfo,
     LoginFailed,
     OpenPrices,
+    OrderFailed,
+    OrderRequest,
+    OrderResult,
     ProductListUnavailable,
     Quote,
     QuoteNotReady,
     build_open_prices,
-    ContractInfo,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,6 +54,31 @@ _MARKET_FUTURES = 2
 
 # 群益的價格是整數且放大 100 倍
 _PRICE_SCALE = 100.0
+
+# 連線環境（SKCenterLib_SetAuthority）：0 正式、1 正式SGX、2 測試、3 測試SGX。
+# **沒有呼叫這個函式時預設是 0（正式環境）**——所以環境一定要明講。
+_AUTHORITY_FLAGS = {"production": 0, "test": 2}
+
+# FUTUREORDER 的欄位值（官方文件 5 章的結構定義）
+_TRADE_TYPE_IOC = 1        # 0:ROD 1:IOC 2:FOK
+_BUY, _SELL = 0, 1         # sBuySell
+_DAY_TRADE_NO = 0          # 不標記當沖
+_SESSION_INTRADAY = 0      # sReserved：0 盤中（T盤及T+1盤）、1 T盤預約
+_MARKET_PRICE = "M"        # bstrPrice：「M」市價、「P」範圍市價；限 IOC/FOK
+
+# 倉別 sNewClose：0 新倉、1 平倉、2 自動。
+# ⚠️ **尚未實機驗證**（ticket 04 最後一條）。台指期同帳號同商品同月份是淨額計算，
+#    在已有反向部位時用「新倉」可能被拒或產生非預期結果，用「自動」則由券商判斷。
+#    在測試環境實打確認之前，不可開啟自動下單。
+_NEW_CLOSE_NEW = 0
+_NEW_CLOSE_AUTO = 2
+
+# OnNewData 的欄位位置。⚠️ 由官方文件的欄位排列推導，尚未實機驗證，
+# 所以 parse_reply_row 不信任索引而是驗證形狀（詳見該函式）。
+_REPLY_KEYNO, _REPLY_MARKET, _REPLY_TYPE, _REPLY_ERR, _REPLY_QTY = 0, 1, 2, 3, 20
+_MARKET_FUTURES_REPLY = "TF"
+_REPLY_TYPES = frozenset("NCUPDBS")     # N委託 C取消 U改量 P改價 D成交 B改價改量 S動態退單
+_REPLY_FILLED = "D"
 
 __all__ = ["CapitalBroker"]
 
@@ -67,7 +96,7 @@ def parse_product_list(raw: str) -> dict:
     殘缺的列直接跳過（清單裡混雜殘列很正常）；但三個目標商品缺任一個就 raise，
     因為訊號需要三個價才算得出來，帶著半套資料往下走只會在更遠的地方壞掉。
     """
-    contracts = {}
+    entries = {}
     for entry in raw.replace("\n", ";").split(";"):
         if entry.startswith("%"):
             entry = entry.rsplit("%", 1)[-1]
@@ -75,13 +104,81 @@ def parse_product_list(raw: str) -> dict:
         if len(fields) < 3:
             continue
         code, last_day = fields[0].strip(), fields[2].strip()
-        if code in PRODUCT_CODES and last_day.isdigit():
-            contracts[code] = ContractInfo(code=code, last_trading_day=int(last_day))
+        if last_day.isdigit():
+            entries[code] = int(last_day)
+
+    contracts = {}
+    for code in PRODUCT_CODES:
+        if code not in entries:
+            continue
+        last_day = entries[code]
+        contracts[code] = ContractInfo(
+            code=code,
+            last_trading_day=last_day,
+            order_code=_find_order_code(code, last_day, entries),
+        )
 
     missing = [c for c in PRODUCT_CODES if c not in contracts]
     if missing:
         raise ProductListUnavailable(f"商品清單缺少：{', '.join(missing)}")
     return contracts
+
+
+def _find_order_code(quote_code: str, last_day: int, entries: dict) -> str:
+    """從清單中找出對應的**下單代碼**（指名月份的那個）。
+
+    報價用 `TX00AM`，下單要用 `TX08`。配對條件是「同商品前綴 + 同最後交易日」：
+    清單裡同時有 TX08（20260819）與 TX09（20260916），用最後交易日才分得開。
+
+    ⚠️ 刻意不自己組字串。三個商品的月份寫法互不相同——大台 `TX08`、
+    小台 `MTX08`、微台 `TM2608`（多了年份兩碼）——任何「規則」都會在微台上錯。
+
+    找不到就 raise。退而求其次用近月連續代碼是不行的：那個代碼能不能下單
+    沒有文件保證，猜錯的後果是委託被拒、或下到完全不同的商品上。
+    """
+    prefix = quote_code[:-2].rstrip("0")      # TX00AM → TX00 → TX
+    candidates = [
+        code for code, day in entries.items()
+        if day == last_day
+        and code != quote_code
+        and code.endswith("AM")
+        and code.startswith(prefix)
+        # 前綴之後必須全是數字，否則 TX 會撈到選擇權之類的其他商品
+        and code[len(prefix):-2].isdigit()
+    ]
+    if not candidates:
+        raise ProductListUnavailable(
+            f"商品清單找不到 {quote_code}（最後交易日 {last_day}）對應的下單代碼"
+        )
+    # 同前綴同最後交易日理應只有一個；真有多個時取最短的，
+    # 那是「商品代碼＋月份」最基本的形式。
+    order_code = min(candidates, key=len)
+    return order_code[:-2]                    # 去掉 AM 後綴，下單不用盤別代碼
+
+
+def build_future_order_fields(request: OrderRequest, account: str) -> dict:
+    """把一筆 `OrderRequest` 轉成 `FUTUREORDER` 的欄位值。
+
+    抽成純函式是為了**讓委託參數可被測試**。這些欄位寫錯的後果各不相同但都很貴：
+    當沖標錯會被課不同稅率也可能被拒、時效寫成 ROD 會掛單整天、
+    買賣別寫反會開出完全相反的部位。留在 COM 呼叫裡的話，沒有 Windows
+    與帳號就一行都驗不到。
+
+    參數依據 ADR-0003（市價、IOC、不標當沖）與官方文件的 FUTUREORDER 結構定義。
+    """
+    return {
+        "bstrFullAccount": account,
+        # 下單代碼（TX08），不是報價代碼（TX00AM）
+        "bstrStockNo": request.order_code,
+        "sBuySell": _BUY if request.side == BUY else _SELL,
+        # 市價在群益是 bstrPrice="M"，且官方註明只能配 IOC 或 FOK
+        "bstrPrice": _MARKET_PRICE,
+        "sTradeType": _TRADE_TYPE_IOC,
+        "nQty": request.lots,
+        "sDayTrade": _DAY_TRADE_NO,
+        "sNewClose": _NEW_CLOSE_NEW,
+        "sReserved": _SESSION_INTRADAY,
+    }
 
 
 def _resolve_dll_path() -> str:
@@ -98,10 +195,57 @@ def _resolve_dll_path() -> str:
 
 
 class _ReplyEvents:
-    """公告接收端。官方要求登入前註冊，且事件必須回傳 -1。"""
+    """公告與委託回報的接收端。官方要求登入前註冊，且 OnReplyMessage 必須回傳 -1。"""
+
+    def __init__(self) -> None:
+        self.rows: list = []
 
     def OnReplyMessage(self, bstrUserID, bstrMessages):
         return -1
+
+    def OnNewData(self, bstrUserID, bstrData):
+        self.rows.append(bstrData)
+
+    def OnConnect(self, bstrUserID, nErrorCode):
+        pass
+
+    def OnDisconnect(self, bstrUserID, nErrorCode):
+        pass
+
+    def OnComplete(self, bstrUserID):
+        pass
+
+
+def parse_reply_row(row: str) -> dict | None:
+    """解析一列 `OnNewData` 回報。看不懂就回 `None`（不是我們的單、或格式不符）。
+
+    ⚠️ **欄位位置是從官方文件的欄位排列推導出來的，尚未實機驗證。**
+    Qty 的索引若推錯，記進狀態檔的就是錯的口數，而下午會照那個錯的數字去平倉——
+    多平的部分會變成方向相反的新倉。這是本系統最貴的失效模式。
+
+    因此這裡**不信任索引，而是驗證形狀**：市場別必須是 TF、Type 必須是已知代碼、
+    數量必須是數字。任何一項對不上就回 None，讓上層當成「沒收到回報」處理
+    （ticket 05 會把那種情況記為「不確定」並要求人工確認）——
+    寧可承認不知道，也不要記一個看起來很合理的錯誤數字。
+    """
+    fields = row.split(",")
+    if len(fields) <= _REPLY_QTY:
+        return None
+    if fields[_REPLY_MARKET].strip() != _MARKET_FUTURES_REPLY:
+        return None
+    row_type = fields[_REPLY_TYPE].strip()
+    if row_type not in _REPLY_TYPES:
+        return None
+    qty = fields[_REPLY_QTY].strip()
+    if not qty.isdigit():
+        return None
+
+    return {
+        "seq": fields[_REPLY_KEYNO].strip() or fields[-1].strip(),
+        "type": row_type,
+        "failed": fields[_REPLY_ERR].strip() == "Y",
+        "qty": int(qty),
+    }
 
 
 class _CenterEvents:
@@ -140,17 +284,38 @@ class _QuoteEvents:
 class CapitalBroker:
     """群益 COM 的 broker 實作。與 `broker.fake.FakeBroker` 同契約。"""
 
-    def __init__(self, user_id: str, password: str, connect_timeout: float = 30.0):
+    def __init__(
+        self,
+        user_id: str,
+        password: str,
+        environment: str = "production",
+        account: str = "",
+        connect_timeout: float = 30.0,
+        fill_timeout: float = 10.0,
+    ):
+        if environment not in _AUTHORITY_FLAGS:
+            raise ValueError(
+                f"environment 必須是 {list(_AUTHORITY_FLAGS)} 之一，目前是 {environment!r}"
+            )
         self._user_id = user_id
         self._password = password
+        self._environment = environment
         self._connect_timeout = connect_timeout
+        self._fill_timeout = fill_timeout
         self._sk = None
         self._center = None
         self._quote = None
+        self._order = None
         self._quote_events = None
+        self._reply_events = None
+        # 期貨帳號由 .env 明確指定，不從 OnAccount 自動挑——
+        # 有多個帳號時「自動挑一個」會把單下到使用者沒預期的帳戶上。
+        # 查法見 tools/verify_login.py。
+        self._account = account
         self._handlers: list = []      # 事件 handler 要留著，被回收就收不到事件了
         self._monitoring = False
         self._subscribed = False
+        self._order_ready = False
 
     # --- 內部：COM 生命週期 ---
 
@@ -168,14 +333,25 @@ class CapitalBroker:
         self._center = comtypes.client.CreateObject(sk.SKCenterLib, interface=sk.ISKCenterLib)
         reply = comtypes.client.CreateObject(sk.SKReplyLib, interface=sk.ISKReplyLib)
         self._quote = comtypes.client.CreateObject(sk.SKQuoteLib, interface=sk.ISKQuoteLib)
+        self._order = comtypes.client.CreateObject(sk.SKOrderLib, interface=sk.ISKOrderLib)
         self._quote_events = _QuoteEvents()
+        self._reply_events = _ReplyEvents()
+
+        # ⚠️ 環境必須在登入前設定，而且**不呼叫時預設是正式環境**。
+        #    測試單送到正式環境就是真錢，所以這一行不可以省略。
+        flag = _AUTHORITY_FLAGS[self._environment]
+        code = self._center.SKCenterLib_SetAuthority(flag)
+        if code != 0:
+            raise LoginFailed(f"設定連線環境（{self._environment}）失敗，{self._message(code)}")
+        logger.info("連線環境：%s", self._environment)
 
         # 順序有意義：公告與聲明書都必須在登入前就有接收端
         self._handlers = [
-            comtypes.client.GetEvents(reply, _ReplyEvents()),
+            comtypes.client.GetEvents(reply, self._reply_events),
             comtypes.client.GetEvents(self._center, _CenterEvents()),
             comtypes.client.GetEvents(self._quote, self._quote_events),
         ]
+        self._reply = reply
 
     def _pump_until(self, predicate, seconds: float) -> bool:
         """COM 事件需要訊息幫浦才會觸發。官方範例靠 tkinter 的 mainloop，我們自己打。"""
@@ -264,6 +440,98 @@ class CapitalBroker:
         if not self._pump_until(_parsed_ok, wait):
             raise ProductListUnavailable(f"{wait:.0f} 秒內未取得完整商品清單")
         return parsed
+
+    def _ensure_order_ready(self) -> None:
+        """初始化下單元件、連上回報、取得期貨帳號。
+
+        ⚠️ **刻意不在 `login()` 裡做。** 自動下單關閉時整條路徑都不該被走到——
+        下單元件初始化失敗會變成致命錯誤，而那天其實只需要發訊號。
+        """
+        if self._order_ready:
+            return
+
+        code = self._order.SKOrderLib_Initialize()
+        if code != 0:
+            raise OrderFailed(f"下單元件初始化失敗，{self._message(code)}")
+
+        # 回報連線。沒有它就收不到 OnNewData，也就不知道成交幾口。
+        code = self._reply.SKReplyLib_ConnectByID(self._user_id)
+        if code != 0:
+            raise OrderFailed(f"回報連線失敗，{self._message(code)}")
+
+        # 群益要求下單前先查過帳號，即使我們用的是 .env 指定的那一個
+        code = self._order.GetUserAccount()
+        if code != 0:
+            raise OrderFailed(f"取得帳號失敗，{self._message(code)}")
+        self._pump_for(2.0)
+
+        self._order_ready = True
+
+    def place_order(self, request: OrderRequest) -> OrderResult:
+        """送出市價 IOC 委託，等成交回報後回傳**實際成交口數**。
+
+        依 ADR-0003：市價、IOC、不標當沖。市價在群益是 `bstrPrice = "M"`，
+        且官方文件註明只能搭配 IOC 或 FOK——與 ADR 的選擇剛好一致。
+
+        ⚠️ 收不到回報時目前是拋 `OrderFailed`。**這在語意上並不精確**：
+        委託可能已經成交、只是回報沒回來，而 `OrderFailed` 的意思是「沒有部位產生」。
+        正確處理（記為「不確定」並要人工確認）屬於 ticket 05，在那之前
+        不可開啟自動下單。
+        """
+        if self._center is None:
+            raise OrderFailed("尚未登入")
+
+        self._ensure_order_ready()
+        if not self._account:
+            raise OrderFailed(
+                "未設定期貨帳號。請執行 tools/verify_login.py --show-account 查出，"
+                "填入 .env 的 CAPITAL_FUTURES_ACCOUNT"
+            )
+
+        order = self._sk.FUTUREORDER()
+        for field, value in build_future_order_fields(request, self._account).items():
+            setattr(order, field, value)
+
+        before = len(self._reply_events.rows)
+        message, code = self._order.SendFutureOrderCLR(self._user_id, False, order)
+        if code != 0:
+            raise OrderFailed(f"委託送出失敗，{self._message(code)}（{message}）")
+        logger.info("委託已送出，序號 %s", message)
+
+        return self._await_fill(seq=str(message), since=before)
+
+    def _await_fill(self, seq: str, since: int) -> OrderResult:
+        """等成交回報，把同一筆委託的成交量加總。
+
+        市價 IOC 可能分批成交，也可能部分成交後產生取消單——所以是加總 `D`（成交）
+        那幾列，不是取第一列。
+        """
+        def _has_terminal_row() -> bool:
+            return any(
+                (parsed := parse_reply_row(row)) and parsed["type"] == _REPLY_FILLED
+                for row in self._reply_events.rows[since:]
+            )
+
+        self._pump_until(_has_terminal_row, self._fill_timeout)
+
+        filled = 0
+        seen_any = False
+        for row in self._reply_events.rows[since:]:
+            parsed = parse_reply_row(row)
+            if parsed is None:
+                continue
+            seen_any = True
+            if parsed["failed"]:
+                raise OrderFailed(f"委託被拒：{row}")
+            if parsed["type"] == _REPLY_FILLED:
+                filled += parsed["qty"]
+
+        if not seen_any:
+            raise OrderFailed(
+                f"{self._fill_timeout:.0f} 秒內未收到任何可解析的回報（委託序號 {seq}）。"
+                "委託可能已成交但回報未到——請人工確認帳戶部位。"
+            )
+        return OrderResult(filled_lots=filled, order_seq=seq)
 
     def get_open_prices(self, expected_trading_day: int | None = None) -> OpenPrices:
         """取三個商品的當日 AM 盤開盤價。

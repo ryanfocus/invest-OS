@@ -22,11 +22,20 @@ _SETTINGS_PATH = os.path.join(_ROOT, "config", "settings.yaml")
 _ENV_PATH = os.path.join(_ROOT, ".env")
 
 
+ENVIRONMENTS = ("production", "test")
+
+
 @dataclass(frozen=True)
 class Config:
     discord_enabled: bool
     quote_retry_attempts: int
     quote_retry_interval_seconds: int
+    # 自動下單。**關閉時程式完全不碰下單 API**，只發訊號。
+    auto_order_enabled: bool
+    order_product: str          # 報價代碼，必須是 broker.PRODUCT_CODES 之一
+    order_lots: int
+    # 群益連線環境。沒有預設值是刻意的——猜錯就是把測試單送到正式環境。
+    capital_environment: str
     # 臨時休市（颱風假）與臨時開市（補班日）。holidays 套件不知道這兩種。
     calendar_extra_closures: frozenset = frozenset()
     calendar_extra_openings: frozenset = frozenset()
@@ -37,6 +46,8 @@ class Config:
         放在這裡而不是 `build()`，是因為測試會直接建構 Config——
         兩條路都要被擋住，否則守不住的那條遲早會被用上。
         """
+        from broker import PRODUCT_CODES
+
         if self.quote_retry_attempts < 1:
             raise ValueError(
                 f"quote.retry_attempts 必須 ≥ 1，目前是 {self.quote_retry_attempts}"
@@ -45,6 +56,18 @@ class Config:
             raise ValueError(
                 f"quote.retry_interval_seconds 不可為負，目前是 "
                 f"{self.quote_retry_interval_seconds}"
+            )
+        if self.order_lots < 1:
+            raise ValueError(f"order.lots 必須 ≥ 1，目前是 {self.order_lots}")
+        if self.order_product not in PRODUCT_CODES:
+            raise ValueError(
+                f"order.product 必須是 {list(PRODUCT_CODES)} 之一，"
+                f"目前是 {self.order_product!r}"
+            )
+        if self.capital_environment not in ENVIRONMENTS:
+            raise ValueError(
+                f"capital.environment 必須是 {list(ENVIRONMENTS)} 之一，"
+                f"目前是 {self.capital_environment!r}"
             )
 
 
@@ -124,6 +147,10 @@ def build(raw) -> Config:
         discord_enabled=raw["discord"]["enabled"],
         quote_retry_attempts=raw["quote"]["retry_attempts"],
         quote_retry_interval_seconds=raw["quote"]["retry_interval_seconds"],
+        auto_order_enabled=raw["order"]["auto_enabled"],
+        order_product=raw["order"]["product"],
+        order_lots=raw["order"]["lots"],
+        capital_environment=raw["capital"]["environment"],
         calendar_extra_closures=_parse_dates(raw["calendar"]["extra_closures"], "calendar.extra_closures"),
         calendar_extra_openings=_parse_dates(raw["calendar"]["extra_openings"], "calendar.extra_openings"),
     )

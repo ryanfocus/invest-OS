@@ -10,7 +10,13 @@
 
 from __future__ import annotations
 
-from broker import ContractInfo, OpenPrices, PRODUCT_CODES, build_open_prices
+from broker import (
+    ContractInfo,
+    OpenPrices,
+    OrderResult,
+    PRODUCT_CODES,
+    build_open_prices,
+)
 
 
 class FakeBroker:
@@ -43,6 +49,8 @@ class FakeBroker:
         login_error: Exception | None = None,
         contracts: dict | None = None,
         contracts_error: Exception | None = None,
+        order_error: Exception | None = None,
+        fills: list | None = None,
     ):
         if script is None and quotes is None:
             script = [OpenPrices(tx=tx, mtx=mtx, tmf=tmf)]
@@ -53,9 +61,14 @@ class FakeBroker:
             code: ContractInfo(code=code, last_trading_day=20260819) for code in PRODUCT_CODES
         }
         self._contracts_error = contracts_error
+        self._order_error = order_error
+        self._fills = list(fills) if fills is not None else None
         self.open_price_calls = 0
         self.login_calls = 0
         self.contract_calls = 0
+        # 收到的委託，依序記錄。「一次都沒被呼叫」要斷言 `orders == []`——
+        # 這是本系統唯一會動到錢的路徑，證明它沒被走過比證明它走對了更重要。
+        self.orders: list = []
 
     def login(self) -> None:
         self.login_calls += 1
@@ -77,3 +90,18 @@ class FakeBroker:
         if self._contracts_error is not None:
             raise self._contracts_error
         return self._contracts
+
+    def place_order(self, request) -> OrderResult:
+        """記下委託並回報成交。
+
+        預設全部成交（`fills=None`）；要測部分成交或未成交就用 `fills=[口數, ...]`，
+        逐次消耗、用完重複最後一項。
+        """
+        self.orders.append(request)
+        if self._order_error is not None:
+            raise self._order_error
+        if self._fills is None:
+            filled = request.lots
+        else:
+            filled = self._fills[0] if len(self._fills) == 1 else self._fills.pop(0)
+        return OrderResult(filled_lots=filled, order_seq=f"FAKE{len(self.orders):09d}")

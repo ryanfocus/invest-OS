@@ -98,6 +98,54 @@ def test_settlement_detection_does_not_use_the_third_wednesday_rule():
     assert delayed.is_settlement_day(date(2026, 8, 20)) is True, "順延後的最後交易日"
 
 
+# --- 下單用的商品代碼 ---
+#
+# 報價用近月連續代碼（TX00AM），下單卻要指名月份（TX08）——群益官方文件在
+# SendFutureOrderCLR 的備註寫明「bstrStockNo帶入TX03」。兩者不是同一個東西。
+
+
+def test_order_code_is_the_month_specific_one_not_the_continuous_one():
+    """下單代碼必須指名月份。
+
+    近月連續代碼是報價用的，不是委託用的。這裡的期望值來自 2026-08-07
+    實際抓到的商品清單：大台的本月合約列是 `TX08AM,台指08,20260819`。
+    """
+    contracts = parse_product_list(REAL_SAMPLE)
+    assert contracts[TX_CODE].order_code == "TX08"
+
+
+def test_each_product_has_its_own_code_format():
+    """三個商品的月份代碼格式**不一樣**，不可以用同一條規則拼出來。
+
+    實際清單：大台 TX08（月）、小台 MTX08（月）、微台 TM2608（年月）。
+    微台多了年份兩碼——自己組字串的話這裡一定會錯，所以只能從清單讀。
+    """
+    contracts = parse_product_list(REAL_SAMPLE)
+    assert contracts[MTX_CODE].order_code == "MTX08"
+    assert contracts[TMF_CODE].order_code == "TM2608"
+
+
+def test_a_later_month_is_not_mistaken_for_the_front_month():
+    """清單裡同時有 TX08 與 TX09，挑錯就會交易到下個月的合約。
+
+    區分依據是最後交易日：近月連續代碼的最後交易日是 20260819，
+    TX09 是 20260916。
+    """
+    contracts = parse_product_list(REAL_SAMPLE)
+    assert contracts[TX_CODE].order_code != "TX09"
+
+
+def test_missing_month_specific_entry_raises_rather_than_guessing():
+    """找不到對應的月份代碼時，絕不可以退而求其次用連續代碼。
+
+    連續代碼能不能下單沒有文件保證，猜錯的後果是委託被拒或下到別的東西上。
+    """
+    without_month = REAL_SAMPLE.replace("TX08AM,台指08,20260819,TXFH6;", "")
+    with pytest.raises(ProductListUnavailable) as exc:
+        parse_product_list(without_month)
+    assert "TX" in str(exc.value)
+
+
 def test_settlement_day_uses_the_expiring_contract_not_next_month():
     """結算日當天進場用的仍是即將到期的那個合約——它當天 13:30 才停止交易。
 

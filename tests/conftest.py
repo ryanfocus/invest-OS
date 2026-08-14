@@ -36,6 +36,12 @@ def make_config(**overrides) -> settings_module.Config:
         "discord_enabled": True,
         "quote_retry_attempts": 3,
         "quote_retry_interval_seconds": 60,
+        # 每個測試預設都是「不下單」——想測下單的必須自己寫明 auto_order_enabled=True。
+        # 這樣「哪些測試會下單」在測試碼裡看得見，不是靠預設值躲起來。
+        "auto_order_enabled": False,
+        "order_product": "MTX00AM",
+        "order_lots": 1,
+        "capital_environment": "test",
         "calendar_extra_closures": frozenset(),
         "calendar_extra_openings": frozenset(),
     }
