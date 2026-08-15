@@ -68,7 +68,16 @@ class FillUnknown(BrokerError):
 
     當成 `OrderFailed` 處理的話不會寫狀態檔，13:40 那班就不會去平——
     部位直接進夜盤而使用者不知情。
+
+    `order_seq` 與 `known_filled` 帶著給人用：委託序號讓使用者能在券商 APP
+    直接查到那一筆，已知成交口數告訴他對帳時**至少**要看到幾口。
+    只有一句錯誤訊息的話，他得自己從幾百筆委託裡找。
     """
+
+    def __init__(self, message: str, *, order_seq: str = "", known_filled: int = 0):
+        super().__init__(message)
+        self.order_seq = order_seq
+        self.known_filled = known_filled
 
 
 # 委託買賣別。刻意不用群益的 0/1：那兩個數字在程式碼裡看不出誰是誰，
@@ -133,6 +142,15 @@ class ContractInfo:
     def is_settlement_day(self, day) -> bool:
         """`day` 是不是這個合約的最後交易日（＝結算日）。"""
         return self.last_trading_day == to_yyyymmdd(day)
+
+    def has_expired(self, day) -> bool:
+        """最後交易日是不是已經過了。**結算日當天不算過期**——那天 13:30 才停止交易。
+
+        存在的理由是 `order_code` 的形式（`MTX08`，商品代號＋月份兩碼）：
+        群益在該月已過期時會**自動改送隔年同月且不報錯**，於是 2026 年 9 月送
+        `MTX08` 成交的會是 2027 年 8 月的合約——完全不同的東西，而且悄無聲息。
+        """
+        return self.last_trading_day < to_yyyymmdd(day)
 
 
 

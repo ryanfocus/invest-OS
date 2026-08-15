@@ -68,6 +68,10 @@ class PositionRecord:
     # 實際成交口數。**`None` 代表不知道**（status 為 UNCERTAIN 時），
     # 不是 0——0 的意思是「確定沒成交」，兩者的正確處理完全相反。
     lots: int | None
+    # 委託口數。成交幾口可能不知道，但**送出去幾口一定知道**——
+    # 那是曝險的上界，「可能有 1 口」與「可能有 10 口」是完全不同的緊急程度。
+    # 對已確認的記錄它還能讓 07 對帳看出部分成交。
+    requested_lots: int = 0
     status: str = CONFIRMED
     order_seq: str = ""
 
@@ -150,4 +154,7 @@ def write_position(record: PositionRecord, path: str = STATE_PATH) -> None:
             os.unlink(tmp)
         raise
 
-    logger.info("狀態檔已更新：%s %s %d 口", record.product, record.side, record.lots)
+    # ⚠️ 用 %s 不是 %d。lots 在「不確定」時是 None，%d 會讓 logging 內部拋
+    #    TypeError 並**把整行丟掉**——而那正是人在 13:40 排查時要找的那一行。
+    logger.info("狀態檔已更新：%s %s %s 口（狀態 %s）",
+                record.product, record.side, record.lots, record.status)

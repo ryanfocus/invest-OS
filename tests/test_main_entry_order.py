@@ -182,6 +182,34 @@ def test_order_uses_the_order_code_not_the_quote_code():
     assert broker.orders[0].product == MTX_CODE, "報價代碼仍要留著，狀態檔與對帳用得到"
 
 
+def test_an_expired_contract_is_never_ordered(state_file):
+    """**過期的合約絕不可以送出去。**
+
+    群益的月份代碼（MTX08）在該月已過期時會**自動改送隔年同月且不報錯**
+    （官方文件 SendFutureOrderCLR 備註明載）。也就是說 2026 年 9 月送 MTX08，
+    成交的會是 2027 年 8 月的合約——完全不同的東西，而且不會有任何錯誤訊息。
+
+    正常情況下商品清單給的近月合約不會過期，所以這條守的是「清單過期或解析錯了」。
+    """
+    from broker import ContractInfo
+    stale = {
+        code: ContractInfo(code=info.code, last_trading_day=20260717,   # 上個月就到期了
+                           order_code=info.order_code)
+        for code, info in CONTRACTS.items()
+    }
+    broker = FakeBroker(script=[LONG_OPENS], contracts=stale)
+    outcome, notifier, _ = _run(LONG_OPENS, broker=broker)
+    assert broker.orders == [], "寧可今天不交易，也不要交易到隔年的合約"
+    assert outcome.exit_code != 0
+    assert "20260717" in notifier.text, "要講出是哪個日期過期了"
+
+
+def test_a_contract_expiring_today_is_still_tradable(state_file):
+    """結算日當天照常進場——合約要到 13:30 才停止交易。"""
+    _, _, broker = _run(LONG_OPENS, today=date(2026, 8, 19))
+    assert len(broker.orders) == 1
+
+
 # --- 狀態檔：下午出場那一班唯一的依據 ---
 
 
@@ -288,7 +316,8 @@ def _unknown_fill_broker():
     from broker import FillUnknown
     return FakeBroker(
         script=[LONG_OPENS], contracts=CONTRACTS,
-        order_error=FillUnknown("10 秒內未收到委託 SEQ0000000001 的回報"),
+        order_error=FillUnknown("10 秒內委託 SEQ0000000001 仍未結束",
+                                order_seq="SEQ0000000001"),
     )
 
 
@@ -312,21 +341,68 @@ def test_the_uncertain_record_keeps_what_a_human_needs_to_check_the_account(stat
     assert record.contract_month == "202608"
 
 
+def test_the_uncertain_record_carries_the_order_sequence_number(state_file):
+    """券商 APP 是用委託序號查單的。沒有它，使用者得從幾百筆裡自己找。"""
+    _run(LONG_OPENS, broker=_unknown_fill_broker())
+    assert read_position(path=str(state_file)).order_seq == "SEQ0000000001"
+
+
+def test_the_uncertain_record_says_how_many_lots_were_ordered(state_file):
+    """成交幾口不知道，但**委託幾口是知道的**——那是曝險的上界。
+
+    「可能有 1 口」和「可能有 10 口」對使用者是完全不同的緊急程度。
+    """
+    cfg = make_config(auto_order_enabled=True, order_lots=3)
+    _run(LONG_OPENS, cfg=cfg, broker=_unknown_fill_broker())
+    record = read_position(path=str(state_file))
+    assert record.requested_lots == 3
+    assert record.lots is None, "成交幾口仍然是不知道"
+
+
+# --- 不確定之後重跑：不可以靜默 ---
+
+
+def test_a_repeat_run_after_an_uncertain_morning_is_not_silent(state_file):
+    """**「絕不在不確定自己持有什麼的狀態下靜默結束」對重跑也成立。**
+
+    早上留下不確定記錄之後，人再跑一次通常正是因為想知道現在怎麼了。
+    這時候什麼都不說，看起來就像「已經沒事了」——但帳上可能還有部位。
+    """
+    _run(LONG_OPENS, broker=_unknown_fill_broker())
+    outcome, notifier, _ = _run(LONG_OPENS)
+    assert notifier.sent != [], "不確定還沒解決，不可以靜悄悄結束"
+    assert outcome.exit_code != 0
+
+
+def test_a_repeat_run_after_a_confirmed_entry_stays_silent(state_file):
+    """對照組：早上正常成交的話，重跑就該安靜——那天沒有待處理的事。"""
+    _run(LONG_OPENS)
+    _, notifier, _ = _run(LONG_OPENS)
+    assert notifier.sent == []
+
+
 def test_an_unconfirmed_fill_asks_for_human_confirmation(state_file):
     """Discord 訊息要能讓人直接行動，不是只說「出錯了」。"""
     _, notifier, _ = _run(LONG_OPENS, broker=_unknown_fill_broker())
     assert "MTX08" in notifier.text, "要講出是哪個商品，否則不知道去看什麼"
-    assert "人工" in notifier.text or "確認" in notifier.text
+    assert "人工確認帳戶實際部位" in notifier.text, "要講出該做什麼，不是只說出事了"
 
 
-def test_an_unconfirmed_fill_is_distinguishable_from_a_rejected_order(state_file):
-    """兩者的正確反應不同：一個要去看帳戶，一個不用。訊息不可以長得一樣。"""
+def test_a_rejected_order_does_not_ask_the_user_to_check_the_account(state_file):
+    """與上一條合起來，才是「兩者分得開」。
+
+    委託確定沒送出去就沒有部位，叫人去對帳只會製造無謂的緊張——
+    而狼來了喊多了，真正該行動的那一則就會被忽略。
+
+    刻意寫成兩條獨立的測試而不是在同一條裡比對兩段文字：那樣寫的話，
+    前一次執行留下的狀態檔會讓第二次撞上重複執行保護，根本走不到被拒那條路。
+    """
     from broker import OrderFailed
-    _, unknown_notifier, _ = _run(LONG_OPENS, broker=_unknown_fill_broker())
-    rejected = FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS,
-                          order_error=OrderFailed("代碼 1038：保證金不足"))
-    _, rejected_notifier, _ = _run(LONG_OPENS, broker=rejected)
-    assert unknown_notifier.text != rejected_notifier.text
+    broker = FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS,
+                        order_error=OrderFailed("代碼 1038：保證金不足"))
+    _, notifier, _ = _run(LONG_OPENS, broker=broker)
+    assert "人工確認帳戶實際部位" not in notifier.text
+    assert "1038" in notifier.text, "但要講清楚為什麼沒送出去"
 
 
 def test_a_rejected_order_leaves_no_position_record(state_file):

@@ -89,7 +89,8 @@ _NEW_CLOSE_NEW = 0
 _REPLY_KEYNO, _REPLY_MARKET, _REPLY_TYPE, _REPLY_ERR, _REPLY_QTY = 0, 1, 2, 3, 20
 _MARKET_FUTURES_REPLY = "TF"
 _REPLY_TYPES = frozenset("NCUPDBS")     # N委託 C取消 U改量 P改價 D成交 B改價改量 S動態退單
-_REPLY_FILLED = "D"
+_REPLY_FILLED = "D"        # 成交
+_REPLY_CANCELLED = "C"     # 取消。IOC 的剩餘量會走這裡，收到它才代表委託真的結束
 
 __all__ = ["CapitalBroker"]
 
@@ -239,21 +240,40 @@ class ReplyRow:
 
 @dataclass(frozen=True)
 class FillSummary:
-    """一筆委託的成交結果。
+    """一筆委託目前為止的回報彙整。
 
-    `matched_rows` 是「認出幾列屬於這筆委託」。它與 `filled_lots == 0` 合起來
-    才分得出三種完全不同的處境：
+    ⚠️ **「收到回報」不等於「這筆委託結束了」。** IOC 的回報依序是：
 
-      matched_rows > 0, filled > 0  → 成交了，記進狀態檔
-      matched_rows > 0, filled == 0 → 確實沒成交（IOC 沒對手價，或被拒）
-      matched_rows == 0             → **不知道**。回報還沒到，或認不出是哪一筆。
-                                       委託可能已經成交，絕不可以當成「沒有部位」。
+        N 委託回報 → 交易所收下了，**單還在市場上**
+        D 成交回報 → 成交一批（可能有好幾列）
+        C 取消回報 → 剩餘量取消，到這裡才真的結束
+
+    只看「有沒有收到回報」的話，`N` 一到就會以為結束了，於是在單還可能正在成交
+    的時候回報 0 口、不寫狀態檔、不發通知——帳上多出來的部位沒有人知道。
+    要問的問題是 `is_settled()`，不是 `matched_rows > 0`。
     """
 
     filled_lots: int
     rejected: bool
     matched_rows: int
+    saw_cancel: bool = False
     reject_reason: str = ""
+
+    def is_settled(self, requested_lots: int) -> bool:
+        """這筆委託確定不會再有成交了嗎？
+
+        三種確定的結局：
+          被拒          → 沒有部位
+          剩餘量已取消  → IOC 走完了，成交多少就是多少
+          全部成交      → 沒有剩餘量可取消，等 C 只會等到逾時
+
+        其他情況一律是「還沒結束」，交給呼叫端當成不確定處理。
+        """
+        return (
+            self.rejected
+            or self.saw_cancel
+            or self.filled_lots >= requested_lots
+        )
 
 
 def summarize_fills(rows, seq: str) -> FillSummary:
@@ -275,6 +295,7 @@ def summarize_fills(rows, seq: str) -> FillSummary:
     filled = 0
     matched = 0
     reject_reason = ""
+    saw_cancel = False
 
     for row in rows:
         parsed = parse_reply_row(row)
@@ -287,12 +308,15 @@ def summarize_fills(rows, seq: str) -> FillSummary:
             reject_reason = row
         if parsed.type == _REPLY_FILLED:
             filled += parsed.qty
+        elif parsed.type == _REPLY_CANCELLED:
+            saw_cancel = True
 
     return FillSummary(
         filled_lots=filled,
         # 有成交就不是失敗——剩餘量被取消是 IOC 的常態，不是錯誤
         rejected=bool(reject_reason) and filled == 0,
         matched_rows=matched,
+        saw_cancel=saw_cancel,
         reject_reason=reject_reason if filled == 0 else "",
     )
 
@@ -565,10 +589,14 @@ class CapitalBroker:
         依 ADR-0003：市價、IOC、不標當沖。市價在群益是 `bstrPrice = "M"`，
         且官方文件註明只能搭配 IOC 或 FOK——與 ADR 的選擇剛好一致。
 
-        ⚠️ 收不到回報時目前是拋 `OrderFailed`。**這在語意上並不精確**：
-        委託可能已經成交、只是回報沒回來，而 `OrderFailed` 的意思是「沒有部位產生」。
-        正確處理（記為「不確定」並要人工確認）屬於 ticket 05，在那之前
-        不可開啟自動下單。
+        ⚠️ **失敗的分類以「單有沒有送出去」為界：**
+
+            送出之前失敗 → `OrderFailed`   確定沒有部位
+            送出之後失敗 → `FillUnknown`   不知道結局，可能已經成交
+
+        後者包含逾時、COM 壞掉、訊息幫浦拋例外——任何意外都算。
+        說成「確定沒有部位」的話，上層不會寫狀態檔，13:40 那班會以為今天沒進場。
+        見 tests/test_post_send_failures.py。
         """
         if self._center is None:
             raise OrderFailed("尚未登入")
@@ -587,27 +615,49 @@ class CapitalBroker:
         before = len(self._reply_events.rows)
         message, code = self._order.SendFutureOrderCLR(self._user_id, False, order)
         if code != 0:
+            # 送出這一步就失敗 → 確定沒有部位產生，OrderFailed 名副其實。
             raise OrderFailed(f"委託送出失敗，{self._message(code)}（{message}）")
-        logger.info("委託已送出，序號 %s", message)
 
-        return self._await_fill(seq=str(message), since=before)
+        # ⚠️ **過了這一行，單就在市場上了。** 之後任何一種失敗都必須是
+        #    FillUnknown 而不是 OrderFailed——包括 COM 壞掉、訊息幫浦拋例外
+        #    這種與委託本身無關的意外。說成「確定沒有部位」的話，
+        #    上層就不會留下記錄，13:40 那班會以為今天沒進場。
+        seq = str(message)
+        logger.info("委託已送出，序號 %s", seq)
+        try:
+            return self._await_fill(seq=seq, since=before, requested_lots=request.lots)
+        except (OrderFailed, FillUnknown):
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise FillUnknown(
+                f"等待委託 {seq} 的回報時發生非預期錯誤（{type(exc).__name__}）：{exc}",
+                order_seq=seq,
+            ) from exc
 
-    def _await_fill(self, seq: str, since: int) -> OrderResult:
-        """等回報到齊，回傳實際成交口數。彙整規則見 `summarize_fills`。"""
+    def _await_fill(self, seq: str, since: int, requested_lots: int) -> OrderResult:
+        """等到這筆委託確定結束為止，回傳實際成交口數。
+
+        等的是 `is_settled()`，**不是「有沒有收到回報」**——委託回報（N）
+        會在成交回報之前先到，拿它當結束條件的話，程式會在單還可能正在成交時收工。
+        """
 
         def _summary() -> FillSummary:
             return summarize_fills(self._reply_events.rows[since:], seq)
 
-        # 等到認出至少一列屬於這筆委託為止
-        self._pump_until(lambda: _summary().matched_rows > 0, self._fill_timeout)
+        self._pump_until(
+            lambda: _summary().is_settled(requested_lots), self._fill_timeout
+        )
         summary = _summary()
 
-        if summary.matched_rows == 0:
-            # ⚠️ **這不等於沒有成交**，只是回報沒到——所以拋的是 FillUnknown
-            #    而不是 OrderFailed。後者的意思是「確定沒有部位產生」，
-            #    用錯的話上層就不會留下記錄，13:40 那班會以為今天沒進場。
+        if not summary.is_settled(requested_lots):
+            # 不知道結局。**這不等於沒有成交**——已知成交的部分也一併講出來，
+            # 使用者去對帳時知道至少要看到幾口。
+            known = (f"（目前已知成交 {summary.filled_lots} 口，"
+                     f"委託 {requested_lots} 口）" if summary.filled_lots else "")
             raise FillUnknown(
-                f"{self._fill_timeout:.0f} 秒內未收到委託 {seq} 的回報"
+                f"{self._fill_timeout:.0f} 秒內委託 {seq} 仍未結束{known}",
+                order_seq=seq,
+                known_filled=summary.filled_lots,
             )
         if summary.rejected:
             raise OrderFailed(f"委託被拒且無成交：{summary.reject_reason}")

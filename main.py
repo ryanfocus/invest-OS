@@ -115,6 +115,14 @@ def _place_entry_order(
         return None
 
     contract = contracts[config.order_product]
+    if contract.has_expired(today):
+        # 下單代碼是「商品代號＋月份兩碼」的形式，群益在該月過期時會自動改送
+        # 隔年同月且不報錯。寧可今天不交易，也不要交易到隔年的合約。
+        raise OrderFailed(
+            f"{contract.code} 的最後交易日 {contract.last_trading_day} 已過，"
+            "不送出委託（過期的月份代碼會被自動改成隔年同月）"
+        )
+
     request = OrderRequest(
         product=config.order_product,
         # 下單代碼與報價代碼是兩回事（MTX08 vs MTX00AM），來源同樣是商品清單。
@@ -129,22 +137,25 @@ def _place_entry_order(
                 request.lots, request.contract_month)
     try:
         result = broker.place_order(request)
-    except FillUnknown:
+    except FillUnknown as exc:
         # **委託送出去了，但不知道成交幾口。** 先把「我送了單」這件事寫下來，
         # 再讓例外往上走。順序不能反——寫檔在後的話，中途出事就什麼記錄都沒有，
         # 下午那班會以為今天沒進場，帳上的部位就直接進夜盤。
-        write_position(
-            PositionRecord(
+        record = PositionRecord(
                 trading_day=to_yyyymmdd(today),
                 product=request.product,
                 order_code=request.order_code,
                 contract_month=request.contract_month,
                 side=request.side,
-                lots=None,              # 不知道，不是 0
+                lots=None,                       # 成交幾口不知道，不是 0
+                requested_lots=request.lots,     # 但送出去幾口是知道的——曝險上界
                 status=UNCERTAIN,
-            ),
-            path=state_path,
+                order_seq=exc.order_seq,         # 讓使用者能在券商 APP 直接查到那一筆
         )
+        write_position(record, path=state_path)
+        # 把記錄掛在例外上帶給呼叫端。在 except 區段裡重新讀檔的話，
+        # 那次讀本身可能拋 StateCorrupted，於是例外逃出 run_entry 而一則通知都不發。
+        exc.record = record
         raise
 
     if result.filled_lots <= 0:
@@ -161,6 +172,7 @@ def _place_entry_order(
             contract_month=request.contract_month,
             side=request.side,
             lots=result.filled_lots,      # 實際成交，不是委託口數
+            requested_lots=request.lots,
             order_seq=result.order_seq,
         ),
         path=state_path,
@@ -253,8 +265,20 @@ def run_entry(
         existing, state_error = None, str(exc)
 
     if existing is not None and existing.trading_day == to_yyyymmdd(today):
-        logger.info("今日已有部位記錄（%s %s %d 口），跳過",
-                    existing.product, existing.side, existing.lots)
+        logger.info("今日已有部位記錄（%s %s %s 口，狀態 %s），不重複進場",
+                    existing.product, existing.side, existing.lots, existing.status)
+
+        if existing.is_uncertain:
+            # ⚠️ **不確定的時候不可以靜默。** 人會再跑一次，多半正是因為想知道
+            #    現在怎麼了；這時什麼都不說，看起來就像「已經沒事了」，
+            #    但帳上可能還有一個沒人管的部位。
+            reason = "早上送出的委託仍未確認成交，狀態尚未解決"
+            logger.error("%s", reason)
+            _send(build_fill_unknown_payload(existing, reason, today))
+            return EntryOutcome(
+                signal=None, opens=None, notified=True, exit_code=1, failure=reason
+            )
+
         return EntryOutcome(
             signal=None, opens=None, notified=False, exit_code=0, skipped=True
         )
@@ -332,9 +356,8 @@ def run_entry(
         # 委託送出去了但回報沒到。記錄已經在 _place_entry_order 裡寫好了，
         # 這裡只負責叫人去看帳戶——訊息刻意與「下單失敗」不同：
         # 那一則的正確反應是「不用管」，這一則是「馬上去確認部位」。
-        record = read_position(path=state_path)
         logger.error("成交回報未確認：%s", exc)
-        _send(build_fill_unknown_payload(record, str(exc), today))
+        _send(build_fill_unknown_payload(exc.record, str(exc), today))
         return EntryOutcome(
             signal=result.signal, opens=opens, notified=notified, exit_code=1,
             failure=f"成交回報未確認：{exc}",
