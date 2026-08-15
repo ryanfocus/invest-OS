@@ -31,6 +31,20 @@ class StateCorrupted(Exception):
     """狀態檔存在但讀不懂。**不可以當成「沒有部位」處理。**"""
 
 
+# 部位記錄的可信度。
+#
+# `CONFIRMED`  收到成交回報，口數是實際成交的數字。
+# `UNCERTAIN`  **已經送出委託，但不知道成交幾口。** 回報沒回來、或認不出是哪一筆。
+#
+# ⚠️ 「不確定」與「確定沒有部位」是兩件完全不同的事，而且長得很像：
+#    確定沒有 → 下午什麼都不用做
+#    不知道   → 下午**絕不可以**自動送單。可能是加倉，也可能開出反向新倉，
+#               比什麼都不做更糟。正確行為是發 Discord 叫人去看帳戶。
+CONFIRMED = "CONFIRMED"
+UNCERTAIN = "UNCERTAIN"
+_STATUSES = (CONFIRMED, UNCERTAIN)
+
+
 @dataclass(frozen=True)
 class PositionRecord:
     """OS 開出的一筆部位。
@@ -51,15 +65,42 @@ class PositionRecord:
     order_code: str
     contract_month: str       # yyyymm
     side: str                 # BUY / SELL（進場方向）
-    lots: int                 # 實際成交口數
+    # 實際成交口數。**`None` 代表不知道**（status 為 UNCERTAIN 時），
+    # 不是 0——0 的意思是「確定沒成交」，兩者的正確處理完全相反。
+    lots: int | None
+    status: str = CONFIRMED
     order_seq: str = ""
 
     def __post_init__(self) -> None:
-        """殘缺的記錄比沒有記錄更糟——出場那一班會拿著它去下單。"""
+        """殘缺或自相矛盾的記錄比沒有記錄更糟——出場那一班會拿著它去下單。
+
+        口數與狀態的關係被綁死在這裡，讓「不確定」在型別上就不可能
+        被誤認成「0 口」：任何 `lots > 0 才處理` 的判斷都會跳過 0，
+        而不確定那一筆正是最需要有人來看的。
+        """
         if not self.order_code:
             raise ValueError(f"{self.product} 的部位記錄缺少下單代碼，出場時無法送出委託")
-        if self.lots < 1:
-            raise ValueError(f"部位口數必須 ≥ 1，目前是 {self.lots}（0 口不是部位）")
+        if self.status not in _STATUSES:
+            raise ValueError(f"未知的 status {self.status!r}，只能是 {list(_STATUSES)}")
+        if self.status == UNCERTAIN and self.lots is not None:
+            raise ValueError(
+                f"不確定的記錄口數必須是 None（目前是 {self.lots}）——"
+                "填數字會讓它看起來像已知的結果"
+            )
+        if self.status == CONFIRMED and (self.lots is None or self.lots < 1):
+            raise ValueError(
+                f"CONFIRMED 的記錄必須有實際口數且 ≥ 1，目前是 {self.lots}"
+            )
+
+    @property
+    def is_uncertain(self) -> bool:
+        """這筆記錄能不能照著自動下單。
+
+        出場那班問這個，而不是自己比對 status 字串——
+        比對字串的地方一多，遲早有一處會漏掉，而漏掉的後果是自動送出一筆
+        口數可能是錯的反向委託。
+        """
+        return self.status == UNCERTAIN
 
 
 def read_position(path: str = STATE_PATH) -> PositionRecord | None:

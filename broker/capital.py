@@ -29,6 +29,7 @@ from dataclasses import dataclass
 
 from broker import (
     BUY,
+    FillUnknown,
     PRODUCT_CODES,
     ContractInfo,
     LoginFailed,
@@ -79,7 +80,8 @@ _MARKET_PRICE = "M"        # bstrPrice：「M」市價、「P」範圍市價；�
 # 倉別 sNewClose：0 新倉、1 平倉、2 自動。
 # ⚠️ **尚未實機驗證**（ticket 04 最後一條）。台指期同帳號同商品同月份是淨額計算，
 #    在已有反向部位時用「新倉」可能被拒或產生非預期結果；若實測如此，改用 2（自動）
-#    由券商判斷。在測試環境實打確認之前，不可開啟自動下單。
+#    由券商判斷。沒有可用的模擬環境（見 ticket 04 的更正），
+#    只能用正式環境 1 口微台實打——在那之前不可開啟自動下單。
 _NEW_CLOSE_NEW = 0
 
 # OnNewData 的欄位位置。⚠️ 由官方文件的欄位排列推導，尚未實機驗證，
@@ -601,12 +603,11 @@ class CapitalBroker:
         summary = _summary()
 
         if summary.matched_rows == 0:
-            # ⚠️ 這**不等於**沒有成交，只是回報沒到。用 OrderFailed 表達其實不精確
-            #    （那個例外的意思是「確定沒有部位產生」），但在 ticket 05 把
-            #    「不確定」狀態做出來之前，停手並要求人工確認是唯一安全的行為。
-            raise OrderFailed(
-                f"{self._fill_timeout:.0f} 秒內未收到委託 {seq} 的回報。"
-                "**委託可能已經成交**，請立刻人工確認帳戶部位。"
+            # ⚠️ **這不等於沒有成交**，只是回報沒到——所以拋的是 FillUnknown
+            #    而不是 OrderFailed。後者的意思是「確定沒有部位產生」，
+            #    用錯的話上層就不會留下記錄，13:40 那班會以為今天沒進場。
+            raise FillUnknown(
+                f"{self._fill_timeout:.0f} 秒內未收到委託 {seq} 的回報"
             )
         if summary.rejected:
             raise OrderFailed(f"委託被拒且無成交：{summary.reject_reason}")

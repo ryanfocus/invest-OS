@@ -275,6 +275,92 @@ def test_yesterdays_record_does_not_block_todays_entry(state_file):
     assert len(broker.orders) == 1
 
 
+# --- 送單後收不到成交回報（ticket 05）---
+#
+# 「委託失敗」與「不知道成交沒有」是兩件完全不同的事：
+#   委託失敗   → 確定沒有部位 → 下午什麼都不用做
+#   回報沒回來 → **可能已經成交** → 下午絕不可以自動送單，要人去看帳戶
+#
+# 混為一談的代價：當成失敗處理 → 不寫狀態檔 → 13:40 不去平 → 部位進夜盤。
+
+
+def _unknown_fill_broker():
+    from broker import FillUnknown
+    return FakeBroker(
+        script=[LONG_OPENS], contracts=CONTRACTS,
+        order_error=FillUnknown("10 秒內未收到委託 SEQ0000000001 的回報"),
+    )
+
+
+def test_an_unconfirmed_fill_is_recorded_as_uncertain(state_file):
+    """回報沒到時**仍要留下記錄**——什麼都不寫的話，下午那班會以為今天沒進場。"""
+    from state import UNCERTAIN
+    _run(LONG_OPENS, broker=_unknown_fill_broker())
+    record = read_position(path=str(state_file))
+    assert record is not None, "已經送出委託了，這件事必須被記下來"
+    assert record.status == UNCERTAIN
+    assert record.lots is None, "不知道成交幾口，不可以填一個數字"
+
+
+def test_the_uncertain_record_keeps_what_a_human_needs_to_check_the_account(state_file):
+    """使用者要拿著這筆記錄去 APP 對帳，所以商品、方向、合約都得在。"""
+    _run(LONG_OPENS, broker=_unknown_fill_broker())
+    record = read_position(path=str(state_file))
+    assert record.product == MTX_CODE
+    assert record.order_code == "MTX08"
+    assert record.side == BUY
+    assert record.contract_month == "202608"
+
+
+def test_an_unconfirmed_fill_asks_for_human_confirmation(state_file):
+    """Discord 訊息要能讓人直接行動，不是只說「出錯了」。"""
+    _, notifier, _ = _run(LONG_OPENS, broker=_unknown_fill_broker())
+    assert "MTX08" in notifier.text, "要講出是哪個商品，否則不知道去看什麼"
+    assert "人工" in notifier.text or "確認" in notifier.text
+
+
+def test_an_unconfirmed_fill_is_distinguishable_from_a_rejected_order(state_file):
+    """兩者的正確反應不同：一個要去看帳戶，一個不用。訊息不可以長得一樣。"""
+    from broker import OrderFailed
+    _, unknown_notifier, _ = _run(LONG_OPENS, broker=_unknown_fill_broker())
+    rejected = FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS,
+                          order_error=OrderFailed("代碼 1038：保證金不足"))
+    _, rejected_notifier, _ = _run(LONG_OPENS, broker=rejected)
+    assert unknown_notifier.text != rejected_notifier.text
+
+
+def test_a_rejected_order_leaves_no_position_record(state_file):
+    """對照組：委託確定沒送出去，就不該有任何部位記錄。"""
+    from broker import OrderFailed
+    broker = FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS,
+                        order_error=OrderFailed("代碼 1038：保證金不足"))
+    _run(LONG_OPENS, broker=broker)
+    assert read_position(path=str(state_file)) is None
+
+
+def test_an_unconfirmed_fill_exits_with_an_error(state_file):
+    """這一天需要有人看，不可以看起來像正常結束。"""
+    outcome, _, _ = _run(LONG_OPENS, broker=_unknown_fill_broker())
+    assert outcome.exit_code != 0
+
+
+def test_the_signal_still_goes_out_when_the_fill_is_unconfirmed(state_file):
+    """訊號是主要產出，不因為下單那一步出狀況而消失。"""
+    _, notifier, _ = _run(LONG_OPENS, broker=_unknown_fill_broker())
+    assert "42331" in notifier.text
+
+
+def test_a_repeat_run_does_not_re_order_after_an_uncertain_record(state_file):
+    """**這是不確定狀態最重要的一條。**
+
+    重跑時看到不確定的記錄，絕不可以「因為不知道有沒有成交所以再送一次」——
+    那有一半機率變成兩倍部位。已經送過單就是送過了。
+    """
+    _run(LONG_OPENS, broker=_unknown_fill_broker())
+    _, _, second = _run(LONG_OPENS)
+    assert second.orders == []
+
+
 def test_a_corrupted_state_file_stops_the_order(state_file):
     """讀不懂就不知道帳上有沒有部位，這時候下單可能變成加倉或反向新倉。
 

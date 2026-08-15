@@ -41,6 +41,8 @@ class Config:
     auto_order_enabled: bool
     order_product: str          # 報價代碼，必須是 broker.PRODUCT_CODES 之一
     order_lots: int
+    # 送出委託後等成交回報的秒數。逾時 → 記為「不確定」並要求人工確認。
+    order_fill_timeout_seconds: int
     # 群益連線環境。沒有預設值是刻意的——猜錯就是把測試單送到正式環境。
     capital_environment: str
     # 臨時休市（颱風假）與臨時開市（補班日）。holidays 套件不知道這兩種。
@@ -78,6 +80,13 @@ class Config:
             )
         if self.order_lots < 1:
             raise ValueError(f"order.lots 必須 ≥ 1，目前是 {self.order_lots}")
+        if self.order_fill_timeout_seconds < 1:
+            # 0 等於不等回報，每一筆委託都會變成「不確定」——那會讓下午
+            # 每天都需要人工介入，等於整個自動化失效。
+            raise ValueError(
+                f"order.fill_timeout_seconds 必須 ≥ 1，"
+                f"目前是 {self.order_fill_timeout_seconds}"
+            )
         if self.order_product not in PRODUCT_CODES:
             raise ValueError(
                 f"order.product 必須是 {list(PRODUCT_CODES)} 之一，"
@@ -169,6 +178,7 @@ def build(raw) -> Config:
         auto_order_enabled=raw["order"]["auto_enabled"],
         order_product=raw["order"]["product"],
         order_lots=raw["order"]["lots"],
+        order_fill_timeout_seconds=raw["order"]["fill_timeout_seconds"],
         capital_environment=raw["capital"]["environment"],
         calendar_extra_closures=_parse_dates(raw["calendar"]["extra_closures"], "calendar.extra_closures"),
         calendar_extra_openings=_parse_dates(raw["calendar"]["extra_openings"], "calendar.extra_openings"),

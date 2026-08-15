@@ -187,6 +187,31 @@ def test_discord_switch_is_type_checked_too():
         _config(discord_enabled="false")
 
 
+# --- 成交回報逾時（ticket 05）---
+
+
+def test_fill_timeout_is_read_from_the_config():
+    assert settings_module.load().order_fill_timeout_seconds > 0
+
+
+def test_fill_timeout_is_long_enough_that_a_normal_fill_arrives_in_time():
+    """設太短的代價：回報其實會到，只是慢了半秒，程式卻已經記成「不確定」。
+
+    「不確定」會讓下午那班拒絕自動平倉、改要求人工處理——
+    每天都要人介入的系統等於沒有自動化。5 秒是這個下限的保守值。
+
+    （設太長沒有對稱的風險：08:50 距離 13:40 還有好幾個小時。）
+    """
+    cfg = settings_module.load()
+    assert cfg.order_fill_timeout_seconds >= 5, "太短會把正常的成交誤判成不確定"
+
+
+def test_zero_fill_timeout_is_rejected_at_load_time():
+    """0 秒等於「不等回報」，每一筆委託都會變成不確定。"""
+    with pytest.raises(ValueError, match="fill_timeout"):
+        _config(order_fill_timeout_seconds=0)
+
+
 def test_unknown_environment_is_rejected_at_load_time():
     """環境只有正式與測試兩種。拼錯時絕不可以「猜一個」——猜錯就是真錢。"""
     with pytest.raises(ValueError, match="environment"):

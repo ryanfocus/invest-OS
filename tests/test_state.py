@@ -18,7 +18,14 @@ import json
 import pytest
 
 from broker import BUY, MTX_CODE, SELL
-from state import PositionRecord, StateCorrupted, read_position, write_position
+from state import (
+    CONFIRMED,
+    UNCERTAIN,
+    PositionRecord,
+    StateCorrupted,
+    read_position,
+    write_position,
+)
 
 RECORD = PositionRecord(
     trading_day=20260810,
@@ -67,6 +74,77 @@ def test_the_recorded_lots_are_the_filled_lots_not_the_requested_ones(tmp_path):
     )
     write_position(partial, path=str(path))
     assert read_position(path=str(path)).lots == 1
+
+
+# --- 「不確定」：已送單，但不知道成交幾口 ---
+#
+# 這是 ticket 05 的核心。它與「沒有部位」是兩件完全不同的事，而且長得很像：
+#
+#   確定沒有部位 → 下午什麼都不用做
+#   不知道有沒有 → 下午**絕不可以**自動送單（可能是加倉、也可能開出反向新倉），
+#                  要發 Discord 叫人去看帳戶
+#
+# 所以「不確定」不是用 lots=0 表示的——那個值的意思是「確定 0 口」。
+
+
+def test_an_uncertain_record_can_be_written_and_read_back(tmp_path):
+    """回報沒到時，狀態檔仍要留下「我送了單」這件事實。
+
+    什麼都不寫的話，下午那班會以為今天沒進場而完全不動作，
+    但帳上可能已經有部位了——那正是這張 ticket 要擋的事。
+    """
+    path = tmp_path / "position.json"
+    record = PositionRecord(
+        trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+        contract_month="202608", side=BUY, lots=None, status=UNCERTAIN,
+        order_seq="SEQ0000000001",
+    )
+    write_position(record, path=str(path))
+    assert read_position(path=str(path)) == record
+
+
+def test_uncertain_lots_are_none_not_zero(tmp_path):
+    """**0 口的意思是「確定沒成交」，不是「不知道」。**
+
+    用 0 表示不確定的話，任何「lots > 0 才處理」的判斷都會靜靜地跳過這筆記錄，
+    而那正是最需要有人來看的一筆。
+    """
+    with pytest.raises(ValueError, match="不確定"):
+        PositionRecord(
+            trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+            contract_month="202608", side=BUY, lots=0, status=UNCERTAIN,
+        )
+
+
+def test_a_confirmed_record_must_have_a_real_lot_count():
+    """反過來也要擋：確定的記錄不可以說「幾口不知道」。"""
+    with pytest.raises(ValueError, match="CONFIRMED"):
+        PositionRecord(
+            trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+            contract_month="202608", side=BUY, lots=None, status=CONFIRMED,
+        )
+
+
+def test_an_unknown_status_is_rejected():
+    with pytest.raises(ValueError, match="status"):
+        PositionRecord(
+            trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+            contract_month="202608", side=BUY, lots=1, status="MAYBE",
+        )
+
+
+def test_uncertain_records_are_flagged_for_the_exit_flow():
+    """出場那班要問的問題是「這筆記錄可不可以照著下單」。
+
+    讓它問一個明確的問題，而不是自己去比對 status 字串——
+    比對字串的地方一多，遲早有一處會漏掉。
+    """
+    uncertain = PositionRecord(
+        trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+        contract_month="202608", side=BUY, lots=None, status=UNCERTAIN,
+    )
+    assert uncertain.is_uncertain is True
+    assert RECORD.is_uncertain is False
 
 
 # --- 壞掉的檔案不可以看起來像「沒有部位」 ---

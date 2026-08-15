@@ -11,6 +11,7 @@ from datetime import date
 
 import requests
 
+from broker import BUY, SELL
 from strategy import LONG, NO_TRADE, SHORT, SignalResult
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,10 @@ _SIGNAL_TEXT = {
     SHORT: "做空",
     NO_TRADE: "不動作",
 }
+
+# 委託買賣別。與訊號方向是不同層次的東西——訊號說「該做多」，委託說「買進」——
+# 所以分成兩張表，不共用。
+_SIDE_TEXT = {BUY: "買進", SELL: "賣出"}
 
 
 def build_signal_payload(result: SignalResult, trading_date: date) -> dict:
@@ -61,6 +66,26 @@ def build_order_failed_payload(reason: str, trading_date: date) -> dict:
         "🚨 下單失敗",
         f"原因：{reason}",
         "訊號已發出，但委託沒有送出去，請確認帳戶部位。",
+    ]
+    return {"content": "\n".join(lines)}
+
+
+def build_fill_unknown_payload(record, reason: str, trading_date: date) -> dict:
+    """**委託送出去了，但不知道成交幾口。** 純函式，無 I/O。
+
+    這是所有訊息裡最需要使用者立刻行動的一則，所以講的是「去做什麼」，
+    不是「發生了什麼錯誤」。與「下單失敗」刻意用不同的字眼與圖示——
+    那一則的正確反應是「不用管」，這一則是「馬上去看帳戶」。
+    """
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "❓ 已送出委託，但**收不到成交回報**",
+        f"商品：{record.order_code}（{record.contract_month}）",
+        f"方向：{_SIDE_TEXT.get(record.side, record.side)}",
+        f"原因：{reason}",
+        "",
+        "**請人工確認帳戶實際部位。** 系統不知道成交了幾口，",
+        "因此今天下午不會自動平倉——需要你自己處理。",
     ]
     return {"content": "\n".join(lines)}
 

@@ -39,13 +39,21 @@ order:
   #    測試 test_shipped_config_has_auto_ordering_switched_off 會擋住
   #    「不小心把開著的設定 commit 上來」。要開之前，先確認：
   #      1. nOpen 在 08:50 與期交所一致（目前未解，見 tools/compare_open.py）
-  #      2. 倉別參數 sNewClose 已在測試環境實打驗證（ticket 04 最後一條）
+  #      2. 倉別 sNewClose 與 OnNewData 欄位位置已實打驗證
+  #         （沒有可用的模擬環境，只能用正式環境 1 口微台，見 ticket 04）
   auto_enabled: false
 
   # 交易標的：TX00AM=大台、MTX00AM=小台、TM0000AM=微台。
   # 程式不檢查槓桿或保證金，口數多少就送多少。
   product: MTX00AM
   lots: 1
+
+  # 送出委託後等成交回報的秒數。
+  #
+  # ⚠️ 逾時**不代表沒成交**——單可能已經成交、只是回報慢了。這時程式會把
+  #    狀態記為「不確定」並要求人工確認，下午不會自動平倉。
+  #    所以設太短的代價是「每天都要人介入」，不是「比較安全」。
+  fill_timeout_seconds: 10
 
 calendar:
   # holidays 套件只知道國定假日，不知道這兩種台灣特有的情況。

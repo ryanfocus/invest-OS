@@ -18,6 +18,7 @@ import strategy
 from broker import (
     BUY,
     SELL,
+    FillUnknown,
     LoginFailed,
     OpenPrices,
     OrderFailed,
@@ -29,12 +30,14 @@ from broker import (
 from calendar_tw import is_trading_day
 from state import (
     STATE_PATH,
+    UNCERTAIN,
     PositionRecord,
     StateCorrupted,
     read_position,
     write_position,
 )
 from notifiers.discord import (
+    build_fill_unknown_payload,
     build_no_signal_payload,
     build_order_failed_payload,
     build_signal_payload,
@@ -124,7 +127,25 @@ def _place_entry_order(
     logger.info("送出委託 %s（%s）%s %d 口 %s",
                 request.order_code, request.product, request.side,
                 request.lots, request.contract_month)
-    result = broker.place_order(request)
+    try:
+        result = broker.place_order(request)
+    except FillUnknown:
+        # **委託送出去了，但不知道成交幾口。** 先把「我送了單」這件事寫下來，
+        # 再讓例外往上走。順序不能反——寫檔在後的話，中途出事就什麼記錄都沒有，
+        # 下午那班會以為今天沒進場，帳上的部位就直接進夜盤。
+        write_position(
+            PositionRecord(
+                trading_day=to_yyyymmdd(today),
+                product=request.product,
+                order_code=request.order_code,
+                contract_month=request.contract_month,
+                side=request.side,
+                lots=None,              # 不知道，不是 0
+                status=UNCERTAIN,
+            ),
+            path=state_path,
+        )
+        raise
 
     if result.filled_lots <= 0:
         # 完全沒成交就沒有部位。寫下記錄的話，下午會去平一個不存在的東西，
@@ -307,6 +328,18 @@ def run_entry(
             config, broker, result.signal, contracts,
             today=today, state_path=state_path,
         )
+    except FillUnknown as exc:
+        # 委託送出去了但回報沒到。記錄已經在 _place_entry_order 裡寫好了，
+        # 這裡只負責叫人去看帳戶——訊息刻意與「下單失敗」不同：
+        # 那一則的正確反應是「不用管」，這一則是「馬上去確認部位」。
+        record = read_position(path=state_path)
+        logger.error("成交回報未確認：%s", exc)
+        _send(build_fill_unknown_payload(record, str(exc), today))
+        return EntryOutcome(
+            signal=result.signal, opens=opens, notified=notified, exit_code=1,
+            failure=f"成交回報未確認：{exc}",
+            contracts=contracts, is_settlement_day=settlement,
+        )
     except OrderFailed as exc:
         return failed(f"委託送出失敗：{exc}")
     except Exception as exc:  # noqa: BLE001
@@ -364,6 +397,7 @@ def main() -> int:
             user_id, password,
             environment=config.capital_environment,
             account=account,
+            fill_timeout=config.order_fill_timeout_seconds,
         ),
         notify=lambda payload: send(payload, webhook),
         state_path=STATE_PATH,
