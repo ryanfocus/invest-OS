@@ -26,7 +26,7 @@
 | 01 | [專案骨架 + 訊號計算 + 假 broker + Discord](issues/01-skeleton-signal-fake-broker-discord.md) | — | ✅ done |
 | 02 | [真實 broker：登入與取得開盤價](issues/02-real-broker-login-and-open-price.md) | 01 | ✅ done |
 | 03 | [交易日與近月合約判定](issues/03-trading-day-and-front-month.md) | 02 | 🟡 待 08/19 驗證 |
-| 04 | [進場下單、狀態檔與開關](issues/04-entry-order-and-position-state.md) | 03 | |
+| 04 | [進場下單、狀態檔與開關](issues/04-entry-order-and-position-state.md) | 03 | 🟡 待倉別／回報欄位實打 |
 | 05 | [部位一致性防護](issues/05-position-consistency-guard.md) | 04 | |
 | 06 | [出場流程](issues/06-exit-flow.md) | 05 | |
 | 07 | [隔日對帳](issues/07-next-day-reconciliation.md) | 04 | |
@@ -40,7 +40,10 @@
 |------|-----------|------|
 | 微台的商品代號 | 02 | ✅ `TM0000AM`（2026-08-07 實測） |
 | **開盤價是 AM 盤還是全盤** | 02 | ✅ 必須用 `AM` 後綴（[ADR-0005](../../docs/adr/0005-use-am-session-quote-codes.md)） |
-| 倉別參數（新倉／自動） | 04 | ⏳ 待測試環境實打 |
+| `nOpen` 在 08:50 是否等於期交所 | 02 | ⏳ 交易日 08:50 跑 `tools/compare_open.py` |
+| 結算日當天用的是即將到期的合約 | 03 | ⏳ 2026-08-19 當天實跑 |
+| 倉別參數（新倉／自動） | 04 | ⏳ **正式環境 1 口微台實打**（無可用模擬環境，見 ticket 04） |
+| `OnNewData` 的欄位位置 | 04 | ⏳ 同上，一起做 |
 
 前兩項曾是「錯了會讓每天訊號都失準、且從數字完全看不出來」的風險。
 實測證實：若用 `TX00` 會取到 44129，正確的 `TX00AM` 是 44177——兩者都是合理的台指價位。
