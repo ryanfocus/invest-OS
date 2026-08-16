@@ -19,7 +19,7 @@
 - [x] 狀態檔已有當日記錄時，重複執行不會再次下單
 - [x] Discord 訊號發報在下單**之前**完成，下單失敗不影響訊號送達
 - [ ] **倉別參數（新倉／自動）的正確值已實機驗證並記錄**（沒有模擬環境，見下）
-- [ ] `tools/verify_order_path.py`：零風險驗證下單前置路徑與回報格式（見下）
+- [x] `tools/verify_order_path.py`：零風險驗證下單前置路徑與回報格式（見下）
 
 ## ⚠️ 更正：群益的「測試環境」不是一般帳戶的模擬環境
 
@@ -117,15 +117,39 @@
 > `SKReplyLib_ConnectByID`（連回報）、`GetOrderReport` / `GetFulfillReport`（查詢）
 > 全都是唯讀的，**只有 `SendFutureOrderCLR` 會真的產生委託**。
 
-### 待補工具：`tools/verify_order_path.py`
+### 工具：`tools/verify_order_path.py` ✅ 已完成
 
-- [ ] 跑完 `_ensure_order_ready()` 的三步（`SKOrderLib_Initialize`、
+- [x] 跑完 `_ensure_order_ready()` 的三步（`SKOrderLib_Initialize`、
       `SKReplyLib_ConnectByID`、`GetUserAccount`），逐步回報成功或錯誤碼
-- [ ] 連上回報主機後**持續聽**，收到任何 `OnNewData` 就把**原始字串**印出來，
+- [x] 連上回報主機後**持續聽**，收到任何 `OnNewData` 就把**原始字串**印出來，
       同時印出 `parse_reply_row` 的解讀結果，兩相對照
-- [ ] 呼叫 `GetOrderReport` 與 `GetFulfillReport`（純查詢），印出原始回傳
-- [ ] **完全不呼叫 `SendFutureOrderCLR`**，且這件事要在程式碼裡看得出來
-- [ ] 帳號預設遮罩，比照 `verify_login.py` 的 `--show-account`
+- [x] 呼叫 `GetOrderReport` 與 `GetFulfillReport`（純查詢），印出原始回傳
+- [x] **完全不呼叫任何送單函式**——啟動時掃自己的**語法樹**確認，
+      不是靠註解承諾（`self_check()`）
+- [x] 帳號預設遮罩，比照 `verify_login.py` 的 `--show-account`
+
+#### 實機結果（2026-08-15 週六，休市）
+
+```
+[1/3] SKOrderLib_Initialize .............. OK
+[2/3] SKReplyLib_ConnectByID ............. OK   ← 專案從沒跑過的那一步
+[3/3] GetUserAccount ..................... OK（2 筆帳號）
+GetOrderReport ........................... M003（查無資料）
+GetFulfillReport ......................... M003（查無資料）
+```
+
+**最大的未知數解掉了**：`SKReplyLib_ConnectByID` 不需要額外開通權限，
+連得上。這原本是最可能在第一次真單時才爆掉、而且會白花錢的地方。
+
+兩個查詢函式也證實可呼叫、錯誤格式為 `M003`（官方文件寫 `M003: 查無資料`，
+實際回傳只有 `M003` 四個字，沒有冒號後的說明——ticket 09 解析時要留意）。
+
+**這次跑不到的**：休市沒有交易，所以沒收到任何 `OnNewData`。
+連線通不代表回報真的會流過來——那要有交易才驗得到。
+
+- [ ] **抓到至少一則真實 `OnNewData` 原始字串**
+      → 交易日跑 `python tools/verify_order_path.py --listen 900`，
+        然後在群益 APP 下任何一筆單（**你本來就要做的交易也算數**）
 
 **這支工具不是 TDD 的產物，也不該假裝是。** 它跟 `verify_login.py`、
 `compare_open.py` 同一類：人跑來看的診斷工具，沒有自動測試在驅動它。
