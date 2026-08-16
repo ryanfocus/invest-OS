@@ -24,6 +24,11 @@ _ENV_PATH = os.path.join(_ROOT, ".env")
 
 ENVIRONMENTS = ("production", "test")
 
+# 期交所對**每筆市價委託**的口數上限：一般交易時段 10 口、盤後 5 口
+# （自 108/5/27 起）。本策略只在日盤交易，所以用 10。
+# 我們送的是市價 IOC（ADR-0003），因此這個上限直接適用。
+MARKET_ORDER_LOT_CAP = 10
+
 # 欄位名 → 設定檔裡的 key。錯誤訊息要講使用者看得到的那個名字，
 # 不是程式內部的欄位名——他要去編輯的是 yaml。
 _YAML_KEYS = {
@@ -80,6 +85,14 @@ class Config:
             )
         if self.order_lots < 1:
             raise ValueError(f"order.lots 必須 ≥ 1，目前是 {self.order_lots}")
+        if self.order_lots > MARKET_ORDER_LOT_CAP:
+            # 我們送的是市價 IOC（ADR-0003），而期交所對每筆市價委託有口數上限。
+            # 超過會被退單，而退單訊息看不出是這個原因。
+            raise ValueError(
+                f"order.lots 不可超過 {MARKET_ORDER_LOT_CAP}，目前是 {self.order_lots}。"
+                "期交所限制每筆市價委託口數（一般交易時段 10 口），超過會被退單。"
+                "要下更多口需要改成分批送單或改用限價，那是另一個設計決定。"
+            )
         if self.order_fill_timeout_seconds < 1:
             # 0 等於不等回報，每一筆委託都會變成「不確定」——那會讓下午
             # 每天都需要人工介入，等於整個自動化失效。

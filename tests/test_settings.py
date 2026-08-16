@@ -158,6 +158,23 @@ def test_lot_size_below_one_is_rejected_at_load_time():
         _config(order_lots=0)
 
 
+def test_lot_size_above_the_exchange_market_order_cap_is_rejected():
+    """**期交所限制每筆市價委託最多 10 口**（一般交易時段，自 108/5/27 起）。
+
+    我們送的是市價 IOC（ADR-0003），所以超過就會被退單。設定成 11 口的話，
+    每天早上都會收到一個看不出原因的失敗——不如在載入時就講清楚。
+
+    期望值來自期交所的委託單種說明，不是從程式反推的。
+    """
+    with pytest.raises(ValueError, match="10"):
+        _config(order_lots=11)
+
+
+def test_the_cap_itself_is_accepted():
+    """10 口是上限本身，合法。"""
+    assert _config(order_lots=10).order_lots == 10
+
+
 def test_unknown_product_is_rejected_at_load_time():
     """打錯商品代碼會下到別的東西上——這是必須在載入時就攔下的錯誤。"""
     with pytest.raises(ValueError, match="product"):
