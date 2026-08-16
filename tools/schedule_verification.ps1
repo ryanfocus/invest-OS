@@ -78,17 +78,23 @@ foreach ($job in $jobs) {
     $log = Join-Path $LogDir "$($job.Log)-$stamp.log"
 
     # 用 cmd 包一層才能把 stdout/stderr 都導到檔案——排程的主控台輸出沒人看得到，
-    # 不導的話跑完等於沒跑。
+    # 不導的話跑完等於沒跑。用 >> 附加而不是 > 覆寫：重試時要看得到前一次
+    # 失敗的原因，覆寫掉就等於把線索丟了。
     $inner = "`"$Python`" -X utf8 `"$(Join-Path $Root $job.Script)`" $($job.Args)"
-    $cmd = "/c chcp 65001 >nul & $inner > `"$log`" 2>&1"
+    $cmd = "/c chcp 65001 >nul & $inner >> `"$log`" 2>&1"
 
     $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument $cmd -WorkingDirectory $Root
     $trigger = New-ScheduledTaskTrigger -Once -At $job.Time
+    # 失敗就重試——這是無人值守的一天，沒有人會發現它沒跑起來。
+    # 「螢幕鎖住時群益 COM 能不能正常運作」目前**沒有驗證過**，
+    # 萬一第一次失敗，重試讓它還有機會在盤中補上。
     $settings = New-ScheduledTaskSettingsSet `
         -WakeToRun `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
         -StartWhenAvailable `
+        -RestartCount 3 `
+        -RestartInterval (New-TimeSpan -Minutes 20) `
         -ExecutionTimeLimit (New-TimeSpan -Hours 6)
 
     if (Get-ScheduledTask -TaskName $job.Name -ErrorAction SilentlyContinue) {
