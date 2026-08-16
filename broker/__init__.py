@@ -85,6 +85,14 @@ class FillUnknown(BrokerError):
 BUY = "BUY"
 SELL = "SELL"
 
+# 委託意圖：這筆單是要**開**部位還是**平**部位。
+#
+# 它決定群益的倉別參數（`sNewClose`），而那個參數兩邊的正確值不一樣——
+# 進場與出場是**兩個獨立的未知數**，進場驗過不代表出場的填法就對。
+# 對應規則與理由見 `broker.capital.build_future_order_fields`。
+ENTRY = "ENTRY"
+EXIT = "EXIT"
+
 
 def to_yyyymmdd(day) -> int:
     """`date` → `20260810`。群益的日期欄位都是這個整數格式。"""
@@ -169,6 +177,7 @@ class OrderRequest:
     contract_month: str     # yyyymm
     side: str               # BUY / SELL
     lots: int
+    intent: str = ENTRY     # ENTRY / EXIT —— 決定倉別，兩邊的正確值不同
 
     def __post_init__(self) -> None:
         """空的下單代碼絕不可以送到券商。
@@ -181,6 +190,8 @@ class OrderRequest:
             raise ValueError(f"{self.product} 沒有下單代碼，無法送出委託")
         if self.lots < 1:
             raise ValueError(f"委託口數必須 ≥ 1，目前是 {self.lots}")
+        if self.intent not in (ENTRY, EXIT):
+            raise ValueError(f"intent 必須是 {ENTRY} 或 {EXIT}，目前是 {self.intent!r}")
 
 
 @dataclass(frozen=True)

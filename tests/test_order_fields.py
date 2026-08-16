@@ -10,11 +10,12 @@
 這一層在真機上驗不到的只剩「群益收下之後怎麼解讀」，那是 ticket 04 最後一條。
 """
 
-from broker import BUY, MTX_CODE, SELL, OrderRequest
+from broker import BUY, ENTRY, EXIT, MTX_CODE, SELL, OrderRequest
 from broker.capital import build_future_order_fields
 
 REQUEST = OrderRequest(
-    product=MTX_CODE, order_code="MTX08", contract_month="202608", side=BUY, lots=2
+    product=MTX_CODE, order_code="MTX08", contract_month="202608",
+    side=BUY, lots=2, intent=ENTRY,
 )
 ACCOUNT = "F9990001234567"
 
@@ -86,11 +87,38 @@ def test_account_is_passed_through():
 # --- 倉別：唯一還沒定案的欄位 ---
 
 
-def test_position_type_is_new_open():
-    """sNewClose：0 新倉、1 平倉、2 自動。目前送 0。
+def test_entry_position_type_is_new_open():
+    """sNewClose：0 新倉、1 平倉、2 自動。進場目前送 0。
 
-    ⚠️ **這個值尚未實機驗證**（ticket 04 最後一條）。台指期同帳號同商品同月份
+    ⚠️ **這個值尚未實機驗證**（ticket 04 里程碑 1）。台指期同帳號同商品同月份
     是淨額計算，已有反向部位時「新倉」可能被拒。這條測試不是在說 0 是對的，
     是在確保它**沒有被隨手改掉**——真要改，得帶著實機證據一起改。
     """
     assert _fields()["sNewClose"] == 0
+
+
+def test_exit_uses_auto_not_close_because_the_order_must_be_able_to_cross_zero():
+    """出場送「自動」(2)，不是「平倉」(1)。
+
+    理由來自 SPEC 部位隔離那張策略作者確認過的表：使用者固定持有 +1、OS 做空 3 口，
+
+        08:50  OS 賣 3    +1 − 3 = −2
+        13:40  OS 買回 3  −2 + 3 = +1
+
+    出場那筆買 3 口時，帳上只有 **2 口空單**。「平倉」平不掉 3 口——
+    它做不到跨越零。用「平倉」的話，這個**策略作者親自確認過的情境每天都會失敗**。
+    「自動」由券商拆成平倉 2 ＋ 新倉 1，才得到表上那個 +1。
+
+    ⚠️ 代價要講清楚：若 OS 的部位已經不在了（例如使用者自己手動平掉），
+    「自動」會開出一個反向新倉，而「平倉」會被拒。這是真實的取捨，
+    選「自動」是因為上面那個情境是**規格確認過的常態**，而部位被手動平掉是例外。
+    仍待里程碑 2 實機驗證。
+    """
+    assert _fields(intent=EXIT)["sNewClose"] == 2
+
+
+def test_entry_and_exit_differ_only_in_position_type():
+    """其餘欄位（市價、IOC、不標當沖、盤中單）兩邊完全一樣。"""
+    entry, exit_ = _fields(intent=ENTRY), _fields(intent=EXIT)
+    differing = {k for k in entry if entry[k] != exit_[k]}
+    assert differing == {"sNewClose"}

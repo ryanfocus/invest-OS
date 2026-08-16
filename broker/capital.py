@@ -29,6 +29,8 @@ from dataclasses import dataclass
 
 from broker import (
     BUY,
+    ENTRY,
+    EXIT,
     FillUnknown,
     PRODUCT_CODES,
     ContractInfo,
@@ -77,12 +79,19 @@ _DAY_TRADE_NO = 0          # 不標記當沖
 _SESSION_INTRADAY = 0      # sReserved：0 盤中（T盤及T+1盤）、1 T盤預約
 _MARKET_PRICE = "M"        # bstrPrice：「M」市價、「P」範圍市價；限 IOC/FOK
 
-# 倉別 sNewClose：0 新倉、1 平倉、2 自動。
-# ⚠️ **尚未實機驗證**（ticket 04 最後一條）。台指期同帳號同商品同月份是淨額計算，
-#    在已有反向部位時用「新倉」可能被拒或產生非預期結果；若實測如此，改用 2（自動）
-#    由券商判斷。沒有可用的模擬環境（見 ticket 04 的更正），
-#    只能用正式環境 1 口微台實打——在那之前不可開啟自動下單。
-_NEW_CLOSE_NEW = 0
+# 倉別 sNewClose：0 新倉、1 平倉、2 自動。**進場與出場的正確值不一樣。**
+#
+# 進場 = 0（新倉）。⚠️ 尚未實機驗證（ticket 04 里程碑 1）。台指期同帳號同商品
+#   同月份是淨額計算，已有反向部位時「新倉」可能被拒；若實測如此改用 2。
+#
+# 出場 = 2（自動），**刻意不是 1（平倉）**。理由是出場那筆委託必須能跨越零：
+#   SPEC 部位隔離那張策略作者確認過的表——使用者固定持有 +1、OS 做空 3 口，
+#   13:40 買回 3 口時帳上只有 2 口空單。「平倉」平不掉 3 口，那個情境會每天失敗。
+#   「自動」由券商拆成平倉 2 ＋ 新倉 1，才得到表上的 +1。
+#   代價：OS 的部位若已不在（使用者自己手動平掉），「自動」會開出反向新倉，
+#   而「平倉」會被拒。選「自動」是因為前者是規格確認過的常態，後者是例外。
+#   仍待里程碑 2 實機驗證。
+_NEW_CLOSE_BY_INTENT = {ENTRY: 0, EXIT: 2}
 
 # OnNewData 的欄位位置。⚠️ 由官方文件的欄位排列推導，尚未實機驗證，
 # 所以 parse_reply_row 不信任索引而是驗證形狀（詳見該函式）。
@@ -188,7 +197,7 @@ def build_future_order_fields(request: OrderRequest, account: str) -> dict:
         "sTradeType": _TRADE_TYPE_IOC,
         "nQty": request.lots,
         "sDayTrade": _DAY_TRADE_NO,
-        "sNewClose": _NEW_CLOSE_NEW,
+        "sNewClose": _NEW_CLOSE_BY_INTENT[request.intent],
         "sReserved": _SESSION_INTRADAY,
     }
 

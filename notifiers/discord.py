@@ -90,6 +90,65 @@ def build_fill_unknown_payload(record, reason: str, trading_date: date) -> dict:
     return {"content": "\n".join(lines)}
 
 
+def build_exit_failed_payload(record, reason: str, trading_date: date) -> dict:
+    """出場失敗 —— **部位還在帳上，而且快要進夜盤了。**
+
+    這是所有訊息裡最急的一則。所以它不講「發生什麼錯誤」，而是直接寫出
+    **使用者要送出什麼單**：商品、方向、口數。看到訊息的人可能在開會、在路上，
+    要能照著念給營業員聽或直接在 APP 上點完。
+    """
+    exit_side = SELL if record.side == BUY else BUY
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "🚨 **出場失敗，部位還在**",
+        "",
+        f"請立刻手動送出：**{_SIDE_TEXT.get(exit_side, exit_side)} {record.lots} 口 "
+        f"{record.order_code}**（{record.contract_month}）",
+        "",
+        f"原因：{reason}",
+    ]
+    return {"content": "\n".join(lines)}
+
+
+def build_partial_exit_payload(record, remaining: int, trading_date: date) -> dict:
+    """只平掉一部分 —— 剩下的口數會過夜。
+
+    與「完全失敗」分開，是因為使用者要送的單不一樣：這裡只剩 `remaining` 口，
+    照原本的口數再送一次會多平。
+    """
+    exit_side = SELL if record.side == BUY else BUY
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "⚠️ **出場只成交一部分**",
+        "",
+        f"還剩 **{remaining} 口**未平。請手動送出："
+        f"**{_SIDE_TEXT.get(exit_side, exit_side)} {remaining} 口 "
+        f"{record.order_code}**（{record.contract_month}）",
+    ]
+    return {"content": "\n".join(lines)}
+
+
+def build_exit_blocked_payload(record, trading_date: date) -> dict:
+    """狀態是「不確定」，所以**刻意不出場**。
+
+    這不是失敗，是拒絕猜測——不知道持有幾口就下單，可能開出反向新倉，
+    比什麼都不做更糟。訊息要講清楚「系統為什麼不動」，否則看起來像壞掉。
+    """
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "❓ **不確定持有幾口，因此沒有自動平倉**",
+        "",
+        f"早上送出過 {record.order_code}（{record.contract_month}）"
+        f"{_SIDE_TEXT.get(record.side, record.side)} {record.requested_lots} 口的委託，"
+        "但沒有收到成交回報。",
+        f"委託序號：{record.order_seq or '（未取得）'}",
+        "",
+        "**請人工確認帳戶實際部位並自行平倉。**",
+        "系統不知道成交了幾口，猜一個數字下單可能開出反向新倉。",
+    ]
+    return {"content": "\n".join(lines)}
+
+
 def send(payload: dict, webhook_url: str, timeout=(5, 10)) -> bool:
     """送出 payload。回傳是否成功。
 

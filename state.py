@@ -72,8 +72,16 @@ class PositionRecord:
     # 那是曝險的上界，「可能有 1 口」與「可能有 10 口」是完全不同的緊急程度。
     # 對已確認的記錄它還能讓 07 對帳看出部分成交。
     requested_lots: int = 0
+    # 這個合約的最後交易日（yyyymmdd）。**出場那班靠它判斷今天是不是結算日**，
+    # 而結算日的規則是「不重試」。存在這裡而不是讓出場再查一次商品清單：
+    # 那個資訊 08:50 就知道了，13:40 再去連報價主機只是多一個會失敗的地方——
+    # 而那時候失敗的代價是部位過夜。
+    last_trading_day: int = 0
     status: str = CONFIRMED
     order_seq: str = ""
+    # 已經平倉了嗎。**部分成交不算**——只平掉一部分時這裡維持 False，
+    # 否則隔日對帳會以為一切正常，而殘留的口數還在帳上。
+    exited: bool = False
 
     def __post_init__(self) -> None:
         """殘缺或自相矛盾的記錄比沒有記錄更糟——出場那一班會拿著它去下單。
@@ -95,6 +103,11 @@ class PositionRecord:
             raise ValueError(
                 f"CONFIRMED 的記錄必須有實際口數且 ≥ 1，目前是 {self.lots}"
             )
+
+    def is_settlement_day(self, day) -> bool:
+        """今天是不是這個合約的最後交易日。結算日的出場**不重試**。"""
+        from broker import to_yyyymmdd
+        return bool(self.last_trading_day) and self.last_trading_day == to_yyyymmdd(day)
 
     @property
     def is_uncertain(self) -> bool:

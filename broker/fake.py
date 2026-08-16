@@ -91,6 +91,19 @@ class FakeBroker:
             raise self._contracts_error
         return self._contracts
 
+    def _next_order_error(self):
+        """下一次 `place_order` 該拋什麼（`None` 代表成功）。
+
+        `order_error` 給單一例外時每次都拋（「一直失敗」）；給 list 時逐次消耗，
+        用完之後不再拋——這樣「前兩次失敗、第三次成功」寫成
+        `[OrderFailed(...), OrderFailed(...), None]` 就好。
+        """
+        if self._order_error is None:
+            return None
+        if not isinstance(self._order_error, list):
+            return self._order_error
+        return self._order_error.pop(0) if self._order_error else None
+
     def place_order(self, request) -> OrderResult:
         """記下委託並回報成交。
 
@@ -98,8 +111,9 @@ class FakeBroker:
         逐次消耗、用完重複最後一項。
         """
         self.orders.append(request)
-        if self._order_error is not None:
-            raise self._order_error
+        error = self._next_order_error()
+        if error is not None:
+            raise error
         if self._fills is None:
             filled = request.lots
         else:

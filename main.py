@@ -1,7 +1,12 @@
 """OS 策略的進入點。
 
 依 ADR-0001，本程式由排程各叫醒一次、跑完就結束，不是常駐服務。
-目前只實作進場流程；出場在後續 ticket 加入。
+
+    python main.py entry    08:50 進場
+    python main.py exit     13:40 出場（結算日 13:30）
+
+兩班是**獨立的執行**，中間靠狀態檔溝通。早上那班異常結束時，
+下午那班仍然會被排程觸發——部位不會因為早上出事就沒人管。
 
 外部相依（broker、通知、sleep）由呼叫端傳入，不在此處建立——
 測試因此能在沒有群益 COM、沒有帳號的機器上驗證整條流程。
@@ -11,12 +16,13 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 
 import strategy
 from broker import (
     BUY,
+    EXIT,
     SELL,
     FillUnknown,
     LoginFailed,
@@ -37,7 +43,10 @@ from state import (
     write_position,
 )
 from notifiers.discord import (
+    build_exit_blocked_payload,
+    build_exit_failed_payload,
     build_fill_unknown_payload,
+    build_partial_exit_payload,
     build_no_signal_payload,
     build_order_failed_payload,
     build_signal_payload,
@@ -149,6 +158,7 @@ def _place_entry_order(
                 side=request.side,
                 lots=None,                       # 成交幾口不知道，不是 0
                 requested_lots=request.lots,     # 但送出去幾口是知道的——曝險上界
+                last_trading_day=contract.last_trading_day,
                 status=UNCERTAIN,
                 order_seq=exc.order_seq,         # 讓使用者能在券商 APP 直接查到那一筆
         )
@@ -173,6 +183,9 @@ def _place_entry_order(
             side=request.side,
             lots=result.filled_lots,      # 實際成交，不是委託口數
             requested_lots=request.lots,
+            # 出場那班靠這個判斷今天是不是結算日（結算日不重試）。
+            # 現在寫下來，13:40 就不必再連一次報價主機去查商品清單。
+            last_trading_day=contract.last_trading_day,
             order_seq=result.order_seq,
         ),
         path=state_path,
@@ -376,27 +389,167 @@ def run_entry(
     )
 
 
-def main() -> int:
-    """正式進入點：組裝真實相依後執行進場流程。
+@dataclass(frozen=True)
+class ExitOutcome:
+    """出場流程的結果。
 
-    這裡是**唯一**建立真實 broker 與 Discord 連線的地方；run_entry 本身不知道
-    自己拿到的是真的還是假的，測試因此能在沒有 COM 的機器上驗證整條流程。
+    | 結局 | `exited` | `remaining` | `exit_code` |
+    |------|----------|-------------|-------------|
+    | 沒事做（無記錄／已出場／非交易日） | False | 0 | 0 |
+    | 完全平掉 | **True** | 0 | 0 |
+    | 部分平掉 | False | 剩幾口 | 1 |
+    | 完全失敗 | False | 全部 | 1 |
+    | 不確定，拒絕出場 | False | 不知道（None） | 1 |
+
+    `exited` 只有**全部平掉**才是 True。部分成交不算——標成 True 的話，
+    隔日對帳會以為一切正常，而殘留的口數還在帳上。
+    """
+
+    exited: bool
+    remaining: int | None
+    notified: bool
+    exit_code: int
+    failure: str | None = None
+    skipped: bool = False
+
+
+_OPPOSITE = {BUY: SELL, SELL: BUY}
+
+
+def run_exit(
+    config: Config,
+    today: date,
+    broker,
+    notify,
+    *,
+    sleep=time.sleep,
+    state_path: str,
+) -> ExitOutcome:
+    """出場流程：讀狀態檔 → 送出等量反向委託 → 更新狀態檔。
+
+    刻意**不查商品清單**：下單代碼與最後交易日在 08:50 就寫進狀態檔了。
+    13:40 再去連一次報價主機只是多一個會失敗的地方，而那時候失敗的代價是部位過夜。
+    """
+
+    def _send(payload) -> bool:
+        if not config.discord_enabled:
+            logger.info("Discord 已關閉，不發送")
+            return False
+        return bool(notify(payload))
+
+    def _quiet() -> ExitOutcome:
+        return ExitOutcome(exited=False, remaining=0, notified=False,
+                           exit_code=0, skipped=True)
+
+    if not is_trading_day(
+        today,
+        extra_closures=config.calendar_extra_closures,
+        extra_openings=config.calendar_extra_openings,
+    ):
+        logger.info("%s 非交易日，靜默結束", today)
+        return _quiet()
+
+    try:
+        record = read_position(path=state_path)
+    except StateCorrupted as exc:
+        # 讀不懂就不知道帳上有沒有部位。這時候送單可能平掉不存在的東西
+        # （＝開出反向新倉），也可能什麼都不做而讓部位過夜。交給人。
+        reason = f"狀態檔異常，未出場：{exc}"
+        logger.error("%s", reason)
+        notified = _send(build_no_signal_payload(reason, today))
+        return ExitOutcome(exited=False, remaining=None, notified=notified,
+                           exit_code=1, failure=reason)
+
+    if record is None or record.trading_day != to_yyyymmdd(today):
+        logger.info("沒有今日的部位記錄，不做任何事")
+        return _quiet()
+    if record.exited:
+        logger.info("今日部位已出場，不重複送單")
+        return _quiet()
+
+    if record.is_uncertain:
+        # ticket 05 定的契約：不知道持有幾口就不准下單。
+        reason = "不確定持有幾口，未自動出場"
+        logger.error("%s", reason)
+        notified = _send(build_exit_blocked_payload(record, today))
+        return ExitOutcome(exited=False, remaining=None, notified=notified,
+                           exit_code=1, failure=reason)
+
+    if not config.auto_order_enabled:
+        logger.info("自動下單已關閉，不送出場委託")
+        return _quiet()
+
+    request = OrderRequest(
+        product=record.product,
+        order_code=record.order_code,
+        contract_month=record.contract_month,
+        side=_OPPOSITE[record.side],
+        lots=record.lots,
+        intent=EXIT,
+    )
+    # 結算日合約 13:30 就停止交易，重試必然失敗、只會拖延告警。
+    # 未平倉部位由交易所現金結算，所以重點是**趕快通知人**，不是多試兩次。
+    settlement = record.is_settlement_day(today)
+    attempts = 1 if settlement else config.quote_retry_attempts
+    if settlement:
+        logger.info("今天是結算日，出場不重試")
+
+    result, last_error = None, None
+    for attempt in range(1, attempts + 1):
+        try:
+            broker.login()
+            result = broker.place_order(request)
+            break
+        except (OrderFailed, FillUnknown) as exc:
+            last_error = exc
+            logger.warning("第 %d/%d 次出場失敗：%s", attempt, attempts, exc)
+            if attempt < attempts:
+                sleep(config.quote_retry_interval_seconds)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            logger.error("出場時發生非預期錯誤（%s）：%s", type(exc).__name__, exc)
+            break
+
+    if result is None:
+        reason = f"出場委託送出失敗：{last_error}"
+        notified = _send(build_exit_failed_payload(record, str(last_error), today))
+        return ExitOutcome(exited=False, remaining=record.lots, notified=notified,
+                           exit_code=1, failure=reason)
+
+    remaining = record.lots - result.filled_lots
+    if remaining > 0:
+        # 部分成交**不算出場成功**。狀態檔記下還剩幾口，隔日對帳才看得到真相。
+        reason = f"出場只成交 {result.filled_lots} 口，還剩 {remaining} 口"
+        logger.error("%s", reason)
+        write_position(replace(record, lots=remaining), path=state_path)
+        notified = _send(build_partial_exit_payload(record, remaining, today))
+        return ExitOutcome(exited=False, remaining=remaining, notified=notified,
+                           exit_code=1, failure=reason)
+
+    logger.info("出場完成，平掉 %d 口", result.filled_lots)
+    write_position(replace(record, exited=True), path=state_path)
+    # 例行出場不發 Discord——使用者要求每天只有一則訊息（早上那則訊號）。
+    return ExitOutcome(exited=True, remaining=0, notified=False, exit_code=0)
+
+
+def _build_runtime():
+    """組裝真實相依。**這裡是唯一建立真實 broker 與 Discord 連線的地方**——
+
+    `run_entry` / `run_exit` 都不知道自己拿到的是真的還是假的，
+    測試因此能在沒有 COM 的機器上驗證整條流程。
+
+    回傳 `(config, broker, notify)`，或在設定不全時回傳 `None`。
     """
     import settings
     from broker.capital import CapitalBroker
     from notifiers.discord import send
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
 
     config = settings.load()
     user_id = settings.read_env("CAPITAL_USER_ID")
     password = settings.read_env("CAPITAL_PASSWORD")
     if not user_id or not password:
         logger.error("找不到 CAPITAL_USER_ID / CAPITAL_PASSWORD，請檢查 .env")
-        return 1
+        return None
 
     account = settings.read_env("CAPITAL_FUTURES_ACCOUNT")
     if config.auto_order_enabled and not account:
@@ -405,7 +558,7 @@ def main() -> int:
             "自動下單已開啟但找不到 CAPITAL_FUTURES_ACCOUNT，"
             "請執行 tools/verify_login.py --show-account 查出後填入 .env"
         )
-        return 1
+        return None
 
     logger.info("連線環境=%s 自動下單=%s 標的=%s %d 口",
                 config.capital_environment,
@@ -413,19 +566,51 @@ def main() -> int:
                 config.order_product, config.order_lots)
 
     webhook = settings.read_env("DISCORD_WEBHOOK_URL")
-    outcome = run_entry(
-        config,
-        today=date.today(),
-        broker=CapitalBroker(
-            user_id, password,
-            environment=config.capital_environment,
-            account=account,
-            fill_timeout=config.order_fill_timeout_seconds,
-        ),
-        notify=lambda payload: send(payload, webhook),
-        state_path=STATE_PATH,
+    broker = CapitalBroker(
+        user_id, password,
+        environment=config.capital_environment,
+        account=account,
+        fill_timeout=config.order_fill_timeout_seconds,
     )
-    logger.info("結束：訊號=%s exit_code=%s", outcome.signal, outcome.exit_code)
+    return config, broker, (lambda payload: send(payload, webhook))
+
+
+def main(argv=None) -> int:
+    """排程的進入點。兩班各叫一次：
+
+        python main.py entry    08:50 進場
+        python main.py exit     13:40 出場（結算日 13:30）
+
+    ⚠️ **刻意做成兩個獨立的執行**（ADR-0001）。早上那班異常結束時，
+    下午那班仍然會被排程觸發——部位不會因為早上出事就沒人管。
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="OS 策略")
+    parser.add_argument("stage", choices=("entry", "exit"),
+                        help="entry=08:50 進場，exit=13:40 出場")
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
+    runtime = _build_runtime()
+    if runtime is None:
+        return 1
+    config, broker, notify = runtime
+
+    today = date.today()
+    if args.stage == "entry":
+        outcome = run_entry(config, today=today, broker=broker, notify=notify,
+                            state_path=STATE_PATH)
+        logger.info("進場結束：訊號=%s exit_code=%s", outcome.signal, outcome.exit_code)
+    else:
+        outcome = run_exit(config, today=today, broker=broker, notify=notify,
+                           state_path=STATE_PATH)
+        logger.info("出場結束：已出場=%s 殘留=%s exit_code=%s",
+                    outcome.exited, outcome.remaining, outcome.exit_code)
     return outcome.exit_code
 
 
