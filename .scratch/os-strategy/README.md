@@ -34,6 +34,22 @@
 | 08 | [排程與部署](issues/08-scheduling-and-deployment.md) | 06 | |
 | 09 | [成交查詢後備](issues/09-fill-query-fallback.md) | 05、06 | 強化，優先度低於 06／07 |
 
+## 🚦 真錢里程碑
+
+**絕不允許在沒有實機測過 API 下單的情況下上線**（硬性關卡寫在 ticket 08）。
+下單路徑目前**一次都沒有執行過**——`SendFutureOrderCLR`、`SKReplyLib_ConnectByID`、
+`OnNewData` 全部沒跑過。
+
+| # | 里程碑 | 需要什麼 | 花費 | 寫在哪 |
+|---|--------|---------|------|--------|
+| 0 | 零風險路徑驗證 | `tools/verify_order_path.py` | 0 元 | [04](issues/04-entry-order-and-position-state.md) |
+| 1 | 第一次真單（只進場，手動平掉） | 進場流程（已完成） | 1 口微台 | [04](issues/04-entry-order-and-position-state.md) |
+| 2 | 第一次完整來回（自動進、自動出） | ticket 06 | 1 口微台 | [06](issues/06-exit-flow.md) |
+| 3 | 第一次無人值守 | ticket 08 + 上列全部 | 依設定 | [08](issues/08-scheduling-and-deployment.md) |
+
+每個里程碑的交付物**不是「驗過了」，而是「抓到的真實資料變成測試的期望值」**——
+目前回報欄位位置與倉別這兩項，期望值只能來自對文件的推導，那是同義反覆。
+
 ## 實機驗證項目
 
 規格標明在這些確認之前**不可開啟自動下單**：

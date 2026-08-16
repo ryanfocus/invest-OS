@@ -37,10 +37,20 @@ order:
   #
   # ⚠️ **關閉時程式完全不呼叫下單 API**，只算訊號、發 Discord。
   #    測試 test_shipped_config_has_auto_ordering_switched_off 會擋住
-  #    「不小心把開著的設定 commit 上來」。要開之前，先確認：
-  #      1. nOpen 在 08:50 與期交所一致（目前未解，見 tools/compare_open.py）
-  #      2. 倉別 sNewClose 與 OnNewData 欄位位置已實打驗證
-  #         （沒有可用的模擬環境，只能用正式環境 1 口微台，見 ticket 04）
+  #    「不小心把開著的設定 commit 上來」。
+  #
+  # 🚦 **絕不允許在沒有實機測過 API 下單的情況下開啟。**
+  #    下單路徑目前一次都沒有執行過——SendFutureOrderCLR、SKReplyLib_ConnectByID、
+  #    OnNewData 全部沒跑過。假 broker 的測試只證明「程式照我想的方式運作」，
+  #    不證明「群益會照我想的方式回應」。
+  #
+  #    要開之前，四項全部要完成（詳見 .scratch/os-strategy/README.md 的真錢里程碑）：
+  #      1. tools/verify_order_path.py 全綠（零風險）
+  #      2. 真單送出過，進場倉別經實測確認（ticket 04 里程碑 1）
+  #      3. 完整來回跑過，出場倉別經實測確認（ticket 06 里程碑 2）
+  #      4. nOpen 在 08:50 與期交所一致（見 tools/compare_open.py）
+  #
+  #    臨時開啟做上述驗證是預期用法，但**驗完要改回 false，且不可 commit 開啟的狀態**。
   auto_enabled: false
 
   # 交易標的：TX00AM=大台、MTX00AM=小台、TM0000AM=微台。
