@@ -83,3 +83,7 @@
 
 - [ ] `GetFulfillReport` 回傳格式的實際欄位位置（與 `OnNewData` 是不同的格式）
 - [ ] 阻塞時間實測多久（決定要不要真的丟到執行緒）
+
+> 📌 這兩項由 [ticket 04](04-entry-order-and-position-state.md) 的
+> `tools/verify_order_path.py` 一起解決——查詢函式是唯讀的，**不必等到本張開工**，
+> 也不必花任何錢。本張動工前應該已經有真實的回傳範例可以照著寫解析。
