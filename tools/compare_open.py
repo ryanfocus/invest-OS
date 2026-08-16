@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import csv
 import datetime
+import json
 import io
 import os
 import sys
 
 import requests
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -182,9 +185,42 @@ def capital_quotes(broker=None) -> dict:
     return result
 
 
+SAMPLE_LOG = os.path.join(_ROOT, "captured", "open-price-samples.jsonl")
+
+
+def _append_sample(date_str: str, samples: list) -> None:
+    """把這次的比對結果**附加**到一個 jsonl 檔。
+
+    ⚠️ 這支工具的說明從第一天就寫著「每天跑一次就能累積證據」，
+    但原本只印在終端機——跑完關掉視窗，證據就沒了。
+    `nOpen` 那 2 點的差異要靠多天樣本才判斷得出是常態還是偶發，
+    沒有累積等於每天重新開始。
+
+    存 jsonl（一行一次執行）而不是 csv：欄位之後大概會再加，
+    jsonl 加欄位不會破壞舊資料。
+    """
+    os.makedirs(os.path.dirname(SAMPLE_LOG), exist_ok=True)
+    entry = {
+        "captured_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        "taifex_date": date_str,
+        "samples": samples,
+    }
+    with open(SAMPLE_LOG, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    total = sum(1 for _ in open(SAMPLE_LOG, encoding="utf-8"))
+    # 用 basename 不用 relpath：後者在樣本檔與專案不同磁碟時會拋 ValueError，
+    # 而這只是一行提示訊息，不值得為它讓整支工具掛掉。
+    print(f"\n本次結果已附加到 captured/{os.path.basename(SAMPLE_LOG)}"
+          f"（累積 {total} 次）")
+    print("  這個檔案不含帳號，但也沒進版控（captured/ 在 .gitignore 內）")
+
+
 def main() -> int:
     date_str = sys.argv[1] if len(sys.argv) > 1 else datetime.date.today().strftime("%Y/%m/%d")
     pairs = [("TX00AM", "TX", "大台"), ("MTX00AM", "MTX", "小台"), ("TM0000AM", "TMF", "微台")]
+
+    samples = []      # 存檔用；不存的話每天跑一次也累積不到任何東西
 
     print(f"現在時間：{datetime.datetime.now():%Y-%m-%d %H:%M:%S}")
     print(f"期交所查詢日期：{date_str}（群益一律是當天的即時報價）\n")
@@ -214,6 +250,15 @@ def main() -> int:
 
         tick_cell = f"{fmt(t_price)} @{tick['time']}" if tick else "—"
         print(f"{label:<6}{fmt(n_open):>12}{tick_cell:>16}{fmt(x_open):>10}   {agree}")
+        samples.append({
+            "product": label,
+            "quote_code": capital_code,
+            "capital_nopen": n_open,
+            "first_real_tick": t_price,
+            "first_real_tick_time": tick["time"] if tick else None,
+            "taifex_open": x_open,
+            "agree": agree.startswith("✅"),
+        })
 
     # ── 其他欄位（用來確認不是抓錯商品）──
     print("\n═══ 其他欄位（對得上就代表商品沒抓錯）═══\n")
@@ -232,6 +277,8 @@ def main() -> int:
                   f"{mine[field]:>10.0f}{theirs[field]:>10.0f}{flag}")
         print(f"{'':<6}{'交易日':<6}{mine['trading_day']:>10}{theirs['month']:>10}（合約月份）")
         print()
+
+    _append_sample(date_str, samples)
     return 0
 
 
