@@ -177,7 +177,10 @@ class OrderRequest:
     contract_month: str     # yyyymm
     side: str               # BUY / SELL
     lots: int
-    intent: str = ENTRY     # ENTRY / EXIT —— 決定倉別，兩邊的正確值不同
+    # ENTRY / EXIT —— 決定倉別，而兩邊的正確值不同。
+    # ⚠️ 刻意**沒有預設值**：忘了填就靜默變成新倉，而那正是
+    #    「平倉單被當成新倉，部位不減反增」那個失效模式。
+    intent: str
 
     def __post_init__(self) -> None:
         """空的下單代碼絕不可以送到券商。

@@ -117,6 +117,19 @@ def test_exit_uses_auto_not_close_because_the_order_must_be_able_to_cross_zero()
     assert _fields(intent=EXIT)["sNewClose"] == 2
 
 
+def test_intent_cannot_be_omitted():
+    """**忘記填 intent 必須是錯誤，不可以靜默變成新倉。**
+
+    給預設值的話，出場那條路徑少傳一個參數就會送出「新倉」的平倉單——
+    那正是 ticket 06 開頭警告的「平倉單被當成新倉，部位不減反增」。
+    這種錯誤不會報錯、不會有錯誤訊息，只會讓部位默默變成兩倍。
+    """
+    import pytest
+    with pytest.raises(TypeError):
+        OrderRequest(product=MTX_CODE, order_code="MTX08",
+                     contract_month="202608", side=BUY, lots=1)
+
+
 def test_entry_and_exit_differ_only_in_position_type():
     """其餘欄位（市價、IOC、不標當沖、盤中單）兩邊完全一樣。"""
     entry, exit_ = _fields(intent=ENTRY), _fields(intent=EXIT)

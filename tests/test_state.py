@@ -31,7 +31,7 @@ RECORD = PositionRecord(
     trading_day=20260810,
     product=MTX_CODE,
     order_code="MTX08",
-    contract_month="202608",
+    contract_month="202608", requested_lots=2, last_trading_day=20260819,
     side=BUY,
     lots=2,
     order_seq="SEQ0000000001",
@@ -70,7 +70,7 @@ def test_the_recorded_lots_are_the_filled_lots_not_the_requested_ones(tmp_path):
     path = tmp_path / "position.json"
     partial = PositionRecord(
         trading_day=20260810, product=MTX_CODE, order_code="MTX08",
-        contract_month="202608", side=SELL, lots=1, order_seq="SEQ2",   # 委託 3 口、只成交 1 口
+        contract_month="202608", requested_lots=2, last_trading_day=20260819, side=SELL, lots=1, order_seq="SEQ2",   # 委託 3 口、只成交 1 口
     )
     write_position(partial, path=str(path))
     assert read_position(path=str(path)).lots == 1
@@ -96,7 +96,7 @@ def test_an_uncertain_record_can_be_written_and_read_back(tmp_path):
     path = tmp_path / "position.json"
     record = PositionRecord(
         trading_day=20260810, product=MTX_CODE, order_code="MTX08",
-        contract_month="202608", side=BUY, lots=None, status=UNCERTAIN,
+        contract_month="202608", requested_lots=2, last_trading_day=20260819, side=BUY, lots=None, status=UNCERTAIN,
         order_seq="SEQ0000000001",
     )
     write_position(record, path=str(path))
@@ -112,7 +112,7 @@ def test_uncertain_lots_are_none_not_zero(tmp_path):
     with pytest.raises(ValueError, match="不確定"):
         PositionRecord(
             trading_day=20260810, product=MTX_CODE, order_code="MTX08",
-            contract_month="202608", side=BUY, lots=0, status=UNCERTAIN,
+            contract_month="202608", requested_lots=2, last_trading_day=20260819, side=BUY, lots=0, status=UNCERTAIN,
         )
 
 
@@ -121,7 +121,7 @@ def test_a_confirmed_record_must_have_a_real_lot_count():
     with pytest.raises(ValueError, match="CONFIRMED"):
         PositionRecord(
             trading_day=20260810, product=MTX_CODE, order_code="MTX08",
-            contract_month="202608", side=BUY, lots=None, status=CONFIRMED,
+            contract_month="202608", requested_lots=2, last_trading_day=20260819, side=BUY, lots=None, status=CONFIRMED,
         )
 
 
@@ -129,7 +129,7 @@ def test_an_unknown_status_is_rejected():
     with pytest.raises(ValueError, match="status"):
         PositionRecord(
             trading_day=20260810, product=MTX_CODE, order_code="MTX08",
-            contract_month="202608", side=BUY, lots=1, status="MAYBE",
+            contract_month="202608", requested_lots=2, last_trading_day=20260819, side=BUY, lots=1, status="MAYBE",
         )
 
 
@@ -141,7 +141,7 @@ def test_uncertain_records_are_flagged_for_the_exit_flow():
     """
     uncertain = PositionRecord(
         trading_day=20260810, product=MTX_CODE, order_code="MTX08",
-        contract_month="202608", side=BUY, lots=None, status=UNCERTAIN,
+        contract_month="202608", requested_lots=2, last_trading_day=20260819, side=BUY, lots=None, status=UNCERTAIN,
     )
     assert uncertain.is_uncertain is True
     assert RECORD.is_uncertain is False
@@ -187,7 +187,7 @@ def test_an_interrupted_write_leaves_the_previous_record_intact(tmp_path, monkey
     monkeypatch.setattr(os, "replace", _boom)
     newer = PositionRecord(
         trading_day=20260811, product=MTX_CODE, order_code="MTX09",
-        contract_month="202609", side=SELL, lots=9, order_seq="SEQ_NEW",
+        contract_month="202609", requested_lots=9, last_trading_day=20260916, side=SELL, lots=9, order_seq="SEQ_NEW",
     )
     with pytest.raises(OSError):
         write_position(newer, path=str(path))

@@ -296,7 +296,8 @@ def test_yesterdays_record_does_not_block_todays_entry(state_file):
     """昨天的記錄不是今天的部位。擋住今天等於整天不交易。"""
     write_position(
         PositionRecord(trading_day=20260807, product=MTX_CODE, order_code="MTX08",
-                       contract_month="202608", side=SELL, lots=1),
+                       contract_month="202608", side=SELL, lots=1,
+                       requested_lots=1, last_trading_day=20260819),
         path=str(state_file),
     )
     _, _, broker = _run(LONG_OPENS)

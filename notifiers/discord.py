@@ -97,7 +97,7 @@ def build_exit_failed_payload(record, reason: str, trading_date: date) -> dict:
     **使用者要送出什麼單**：商品、方向、口數。看到訊息的人可能在開會、在路上，
     要能照著念給營業員聽或直接在 APP 上點完。
     """
-    exit_side = SELL if record.side == BUY else BUY
+    exit_side = record.exit_side
     lines = [
         f"{trading_date.strftime('%Y/%m/%d')} OS",
         "🚨 **出場失敗，部位還在**",
@@ -116,7 +116,7 @@ def build_partial_exit_payload(record, remaining: int, trading_date: date) -> di
     與「完全失敗」分開，是因為使用者要送的單不一樣：這裡只剩 `remaining` 口，
     照原本的口數再送一次會多平。
     """
-    exit_side = SELL if record.side == BUY else BUY
+    exit_side = record.exit_side
     lines = [
         f"{trading_date.strftime('%Y/%m/%d')} OS",
         "⚠️ **出場只成交一部分**",
@@ -145,6 +145,45 @@ def build_exit_blocked_payload(record, trading_date: date) -> dict:
         "",
         "**請人工確認帳戶實際部位並自行平倉。**",
         "系統不知道成交了幾口，猜一個數字下單可能開出反向新倉。",
+    ]
+    return {"content": "\n".join(lines)}
+
+
+def build_exit_unknown_payload(record, reason: str, trading_date: date) -> dict:
+    """出場單送出去了，但**收不到回報**——不知道平掉沒有。
+
+    與「出場失敗」刻意分開：那一則的意思是「確定沒平，請照著送這張單」，
+    這一則是「**可能平了也可能沒平，先去看帳戶再決定**」。
+    照著失敗那則的指示盲送，若原本已經平掉就是開出反向新倉。
+    """
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "❓ **出場委託已送出，但收不到回報**",
+        "",
+        f"商品：{record.order_code}（{record.contract_month}）",
+        f"送出的是：{_SIDE_TEXT.get(record.exit_side, record.exit_side)} "
+        f"{record.requested_lots} 口",
+        f"原因：{reason}",
+        "",
+        "**請先確認帳戶實際部位再決定要不要補單。**",
+        "系統不知道這筆平掉沒有——盲目再送一次，若原本已經平掉就是開出反向新倉。",
+    ]
+    return {"content": "\n".join(lines)}
+
+
+def build_exit_state_broken_payload(reason: str, trading_date: date) -> dict:
+    """出場時狀態檔讀不懂。
+
+    刻意不共用「今日無訊號」那則——那句話在 13:40 出現只會讓人以為今天沒事，
+    而真相是「可能有部位，但我讀不到記錄」。
+    """
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "🚨 **出場時讀不到部位記錄**",
+        f"原因：{reason}",
+        "",
+        "**請人工確認帳戶是否有未平倉部位。**",
+        "系統無法判斷今天有沒有進場，因此沒有送出任何委託。",
     ]
     return {"content": "\n".join(lines)}
 

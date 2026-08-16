@@ -189,10 +189,9 @@ def test_giving_up_alerts_with_enough_detail_to_act_on():
     broker = FakeBroker(order_error=OrderFailed("代碼 1038：保證金不足"))
     outcome, notifier, _ = _run(_record(side=BUY, lots=2), broker=broker)
     assert outcome.exit_code != 0
-    text = notifier.text
-    assert "MTX08" in text, "要講出商品"
-    assert "2" in text, "要講出口數"
-    assert "賣" in text or SELL in text, "要講出該送哪個方向"
+    # 斷言的是**整句指示**，不是零散的字元。只比 "2" in text 的話，
+    # 日期 2026/08/10 本身就含 0、1、2——那條斷言不管口數多少都會過。
+    assert "賣出 2 口 MTX08" in notifier.text
 
 
 def test_a_failed_exit_is_not_recorded_as_exited():
@@ -208,19 +207,98 @@ def test_settlement_day_does_not_retry():
 
     未平倉部位會被交易所現金結算，所以重試沒有意義——
     重點是**趕快告訴使用者**，不是多試兩次。
+
+    寫法：安排「第一次失敗、第二次會成功」。有重試的話結果是成功，
+    沒重試就是失敗——用**結果**分辨，不去數呼叫次數（那是實作細節）。
     """
     from broker import OrderFailed
-    broker = FakeBroker(order_error=OrderFailed("合約已停止交易"))
-    _run(_record(trading_day=20260819), broker=broker, today=SETTLEMENT)
-    assert len(broker.orders) == 1, "結算日只送一次"
+    broker = FakeBroker(order_error=[OrderFailed("合約已停止交易"), None])
+    outcome, notifier, _ = _run(_record(trading_day=20260819),
+                                broker=broker, today=SETTLEMENT)
+    assert outcome.exit_code != 0, "結算日不重試，所以第二次的成功拿不到"
+    assert notifier.sent != [], "而且要立刻告訴使用者"
 
 
 def test_an_ordinary_day_does_retry():
-    """對照組：非結算日會用完設定的重試次數。"""
+    """對照組：同一組安排，非結算日會再試一次而成功。"""
     from broker import OrderFailed
-    broker = FakeBroker(order_error=OrderFailed("暫時性失敗"))
-    _run(_record(), broker=broker)
-    assert len(broker.orders) > 1
+    broker = FakeBroker(order_error=[OrderFailed("暫時性失敗"), None])
+    outcome, notifier, _ = _run(_record(), broker=broker)
+    assert outcome.exit_code == 0
+    assert notifier.sent == []
+
+
+# --- 收不到出場回報：**絕不重試**（code-review 2026-08-16 發現的真實漏洞）---
+#
+# `FillUnknown` 的意思是「單送出去了，但不知道成交沒有」。出場時它特別危險：
+# 第一筆若其實已經平掉了，重試就是再送一筆同樣大小的反向單——
+# 平完之後繼續賣，於是開出一個**方向相反、沒人管的新倉**。
+#
+# 而出場的倉別是「自動」，券商不會擋——它會很樂意幫你開那個新倉。
+
+
+def test_an_unconfirmed_exit_is_never_retried():
+    """**這是本張最貴的一條。**
+
+    broker/__init__.py 對 `FillUnknown` 的定義寫著「可能已經成交 → 絕不可以自動送單」。
+    出場的重試迴圈原本把它跟 `OrderFailed` 一起攔下來重試，直接違反那條規則。
+    """
+    from broker import FillUnknown
+    # 安排成「第一次不確定、第二次會成功」。有重試的話會拿到那個成功
+    # 並標記為已出場——而那正是最危險的結果：帳上可能已經是反向新倉了。
+    broker = FakeBroker(order_error=[FillUnknown("回報沒回來"), None])
+    outcome, _, _ = _run(_record(lots=2), broker=broker)
+    assert outcome.exited is False, "可能已經成交的單，一次都不准再送"
+    assert read_position(path=state_path()).exited is False
+
+
+def test_an_unconfirmed_exit_is_recorded_as_uncertain():
+    """不知道平掉沒有 → 狀態要記成「不確定」，否則隔日對帳看不到這件事。
+
+    維持 CONFIRMED 的話，記錄上會是「有 2 口、還沒出場」——
+    那是一個**看起來很確定的錯誤**，而真相是「可能已經平了，也可能沒有」。
+    """
+    from broker import FillUnknown
+    broker = FakeBroker(order_error=FillUnknown("回報沒回來"))
+    _run(_record(lots=2), broker=broker)
+    record = read_position(path=state_path())
+    assert record.is_uncertain is True
+    assert record.lots is None
+    assert record.exited is False
+
+
+def test_an_unconfirmed_exit_alerts_loudly():
+    from broker import FillUnknown
+    broker = FakeBroker(order_error=FillUnknown("回報沒回來"))
+    outcome, notifier, _ = _run(_record(), broker=broker)
+    assert outcome.exit_code != 0
+    assert notifier.sent != []
+    assert "MTX08" in notifier.text
+
+
+def test_a_plain_order_failure_is_still_retried():
+    """對照組：`OrderFailed` 是「確定沒送出去」，重試安全且應該做。"""
+    from broker import OrderFailed
+    broker = FakeBroker(order_error=[OrderFailed("暫時性失敗"), None])
+    outcome, notifier, _ = _run(_record(), broker=broker)
+    assert outcome.exit_code == 0, "第二次成功就算完成"
+    assert notifier.sent == []
+
+
+# --- 開關關閉但帳上有部位 ---
+
+
+def test_the_switch_being_off_with_a_live_position_is_not_silent():
+    """開關關著時進場不會寫記錄，所以「有記錄 + 開關關著」代表有人中途關掉了。
+
+    這時候靜默結束等於讓部位過夜而沒有人知道。程式不該自作主張送單
+    （使用者剛把開關關掉），但**必須講出來**。
+    """
+    cfg = make_config(auto_order_enabled=False)
+    outcome, notifier, broker = _run(_record(), cfg=cfg)
+    assert broker.orders == [], "開關關著就不送單"
+    assert notifier.sent != [], "但帳上有部位這件事必須講"
+    assert outcome.exit_code != 0
 
 
 # --- 部分成交：從 ticket 05 接手 ---
@@ -236,8 +314,9 @@ def test_a_partial_exit_is_not_success():
 def test_a_partial_exit_says_how_many_lots_are_left():
     """訊息要能讓使用者直接手動處理，所以要講**剩幾口**，不是只說失敗。"""
     _, notifier, _ = _run(_record(lots=2), fills=[1])
-    assert "1" in notifier.text, "殘留 1 口要講出來"
-    assert "MTX08" in notifier.text
+    # 同樣斷言整句指示——而且口數是**殘留的 1**，不是原本的 2。
+    # 照原本口數再送一次會多平，那正是這則訊息存在的理由。
+    assert "賣出 1 口 MTX08" in notifier.text
 
 
 def test_a_partial_exit_records_what_is_still_held():
@@ -297,7 +376,6 @@ def test_settlement_day_entry_then_exit_does_not_retry():
 
 
 def test_a_zero_fill_exit_leaves_the_whole_position():
-    from broker import OrderFailed  # noqa: F401
     _run(_record(lots=2), fills=[0])
     record = read_position(path=state_path())
     assert record.exited is False

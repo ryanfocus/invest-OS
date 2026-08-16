@@ -71,12 +71,16 @@ class PositionRecord:
     # 委託口數。成交幾口可能不知道，但**送出去幾口一定知道**——
     # 那是曝險的上界，「可能有 1 口」與「可能有 10 口」是完全不同的緊急程度。
     # 對已確認的記錄它還能讓 07 對帳看出部分成交。
-    requested_lots: int = 0
+    requested_lots: int
     # 這個合約的最後交易日（yyyymmdd）。**出場那班靠它判斷今天是不是結算日**，
     # 而結算日的規則是「不重試」。存在這裡而不是讓出場再查一次商品清單：
     # 那個資訊 08:50 就知道了，13:40 再去連報價主機只是多一個會失敗的地方——
     # 而那時候失敗的代價是部位過夜。
-    last_trading_day: int = 0
+    #
+    # ⚠️ 刻意**沒有預設值**。給 0 當預設的話，缺這個欄位的舊狀態檔會讓
+    #    `is_settlement_day` 永遠回 False——結算日的「不重試」規則被靜默關掉。
+    #    現在缺欄位會在 `read_position` 就拋 StateCorrupted。
+    last_trading_day: int
     status: str = CONFIRMED
     order_seq: str = ""
     # 已經平倉了嗎。**部分成交不算**——只平掉一部分時這裡維持 False，
@@ -104,10 +108,21 @@ class PositionRecord:
                 f"CONFIRMED 的記錄必須有實際口數且 ≥ 1，目前是 {self.lots}"
             )
 
+    @property
+    def exit_side(self) -> str:
+        """平掉這個部位要送的買賣別。
+
+        **只有這一個地方做方向反轉。** 這個對應寫反的後果是部位加倍而不是平倉，
+        而它原本散在三處（`main` 一處、Discord 訊息兩處）——
+        散開的話遲早有一處會跟其他的不一致。
+        """
+        from broker import BUY, SELL
+        return SELL if self.side == BUY else BUY
+
     def is_settlement_day(self, day) -> bool:
         """今天是不是這個合約的最後交易日。結算日的出場**不重試**。"""
         from broker import to_yyyymmdd
-        return bool(self.last_trading_day) and self.last_trading_day == to_yyyymmdd(day)
+        return self.last_trading_day == to_yyyymmdd(day)
 
     @property
     def is_uncertain(self) -> bool:

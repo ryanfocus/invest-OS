@@ -14,11 +14,12 @@ COM 元件壞掉、訊息幫浦拋例外、回報主機斷線——都**不能**
 
 import pytest
 
-from broker import BUY, FillUnknown, MTX_CODE, OrderFailed, OrderRequest
+from broker import BUY, ENTRY, FillUnknown, MTX_CODE, OrderFailed, OrderRequest
 from broker.capital import CapitalBroker
 
 REQUEST = OrderRequest(
-    product=MTX_CODE, order_code="MTX08", contract_month="202608", side=BUY, lots=1
+    product=MTX_CODE, order_code="MTX08", contract_month="202608",
+    side=BUY, lots=1, intent=ENTRY,
 )
 
 

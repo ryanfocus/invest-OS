@@ -22,6 +22,7 @@ from datetime import date
 import strategy
 from broker import (
     BUY,
+    ENTRY,
     EXIT,
     SELL,
     FillUnknown,
@@ -45,6 +46,8 @@ from state import (
 from notifiers.discord import (
     build_exit_blocked_payload,
     build_exit_failed_payload,
+    build_exit_state_broken_payload,
+    build_exit_unknown_payload,
     build_fill_unknown_payload,
     build_partial_exit_payload,
     build_no_signal_payload,
@@ -140,6 +143,7 @@ def _place_entry_order(
         contract_month=contract.contract_month,
         side=side,
         lots=config.order_lots,
+        intent=ENTRY,
     )
     logger.info("送出委託 %s（%s）%s %d 口 %s",
                 request.order_code, request.product, request.side,
@@ -413,9 +417,6 @@ class ExitOutcome:
     skipped: bool = False
 
 
-_OPPOSITE = {BUY: SELL, SELL: BUY}
-
-
 def run_exit(
     config: Config,
     today: date,
@@ -456,7 +457,7 @@ def run_exit(
         # （＝開出反向新倉），也可能什麼都不做而讓部位過夜。交給人。
         reason = f"狀態檔異常，未出場：{exc}"
         logger.error("%s", reason)
-        notified = _send(build_no_signal_payload(reason, today))
+        notified = _send(build_exit_state_broken_payload(reason, today))
         return ExitOutcome(exited=False, remaining=None, notified=notified,
                            exit_code=1, failure=reason)
 
@@ -476,14 +477,20 @@ def run_exit(
                            exit_code=1, failure=reason)
 
     if not config.auto_order_enabled:
-        logger.info("自動下單已關閉，不送出場委託")
-        return _quiet()
+        # 開關關著時進場不會寫記錄，所以「有記錄 + 開關關著」代表有人中途關掉了。
+        # 不自作主張送單（使用者剛把開關關掉），但**必須講出來**——
+        # 靜默結束等於讓部位過夜而沒有人知道。
+        reason = "自動下單已關閉，但帳上仍有今日部位記錄，未自動出場"
+        logger.error("%s", reason)
+        notified = _send(build_exit_blocked_payload(record, today))
+        return ExitOutcome(exited=False, remaining=record.lots, notified=notified,
+                           exit_code=1, failure=reason)
 
     request = OrderRequest(
         product=record.product,
         order_code=record.order_code,
         contract_month=record.contract_month,
-        side=_OPPOSITE[record.side],
+        side=record.exit_side,
         lots=record.lots,
         intent=EXIT,
     )
@@ -494,13 +501,41 @@ def run_exit(
     if settlement:
         logger.info("今天是結算日，出場不重試")
 
+    # 登入放在重試迴圈**外面**：重試的是委託，不是身分驗證。
+    # 而且真正的 login() 會重新驗證憑證並等聲明書，每次重試都做一遍很浪費。
+    try:
+        broker.login()
+    except Exception as exc:  # noqa: BLE001
+        reason = f"出場登入失敗：{exc}"
+        logger.error("%s", reason)
+        notified = _send(build_exit_failed_payload(record, str(exc), today))
+        return ExitOutcome(exited=False, remaining=record.lots, notified=notified,
+                           exit_code=1, failure=reason)
+
     result, last_error = None, None
     for attempt in range(1, attempts + 1):
         try:
-            broker.login()
             result = broker.place_order(request)
             break
-        except (OrderFailed, FillUnknown) as exc:
+        except FillUnknown as exc:
+            # ⚠️ **絕不重試。** FillUnknown 的意思是「單送出去了，可能已經成交」。
+            #    再送一筆同樣大小的反向單，若第一筆其實成交了，就是平完之後繼續賣——
+            #    開出一個方向相反、沒人管的新倉。而出場倉別是「自動」，券商不會擋。
+            #    這條規則寫在 broker/__init__.py 的 FillUnknown docstring 裡。
+            reason = f"出場委託送出了但收不到回報：{exc}"
+            logger.error("%s", reason)
+            # 不知道平掉沒有 → 記成「不確定」。維持 CONFIRMED 的話，記錄上會是
+            # 「有 N 口、還沒出場」，那是一個看起來很確定的錯誤。
+            write_position(
+                replace(record, lots=None, status=UNCERTAIN, order_seq=exc.order_seq
+                        or record.order_seq),
+                path=state_path,
+            )
+            notified = _send(build_exit_unknown_payload(record, str(exc), today))
+            return ExitOutcome(exited=False, remaining=None, notified=notified,
+                               exit_code=1, failure=reason)
+        except OrderFailed as exc:
+            # 確定沒送出去 → 重試是安全的，而且應該做。
             last_error = exc
             logger.warning("第 %d/%d 次出場失敗：%s", attempt, attempts, exc)
             if attempt < attempts:
