@@ -52,20 +52,25 @@ if ($Date -eq "") {
 }
 
 # 兩項工作與各自的起跑時間。
-#   08:44 開盤價比對——要趕在 08:45 開盤那一刻前後把報價抓下來
-#   08:50 回報監聽——等前一支跑完再開始，避免兩個連線互踢
+#
+# ⚠️ **08:45 才開盤。** 第一版排在 08:44，2026-08-17 實測跑出三個 0——
+#    那時候一筆成交都還沒有，nOpen 自然是 0（正是主程式 L1 判定的「尚未成交」）。
+#    「趕在開盤前」是錯的直覺：這支工具要的是**已經產生的**開盤價。
+#
+#   08:50 開盤價比對——與正式進場流程同一個時間點，讀到的東西才有代表性
+#   08:56 回報監聽——等前一支跑完再開始，避免兩個連線互踢
 #            聽到 13:45 收盤，這樣你**盤中任何時候**下單都會被抓到
 $jobs = @(
     @{ Name = $TaskCompare
-       Time = $target.Date.AddHours(8).AddMinutes(44)
+       Time = $target.Date.AddHours(8).AddMinutes(50)
        Script = "tools\compare_open.py"
        Args = ""
        Log = "compare_open" },
     @{ Name = $TaskListen
-       Time = $target.Date.AddHours(8).AddMinutes(50)
+       Time = $target.Date.AddHours(8).AddMinutes(56)
        Script = "tools\verify_order_path.py"
-       # 08:50 → 13:45 收盤，約 17700 秒。聽整個盤，不必你配合時間下單。
-       Args = "--listen 17700"
+       # 08:56 → 13:45 收盤，約 17340 秒。聽整個盤，不必你配合時間下單。
+       Args = "--listen 17340"
        Log = "verify_order_path" }
 )
 
