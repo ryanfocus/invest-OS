@@ -30,8 +30,8 @@
 | 04 | [進場下單、狀態檔與開關](issues/04-entry-order-and-position-state.md) | 03 | 🟡 待倉別／回報欄位實打 |
 | 05 | [部位一致性防護](issues/05-position-consistency-guard.md) | 04 | ✅ 出場側已由 06 收尾 |
 | 06 | [出場流程](issues/06-exit-flow.md) | 05 | 🟡 程式完成，出場倉別待里程碑 2 |
-| 07 | [隔日對帳](issues/07-next-day-reconciliation.md) | 04 | |
-| 08 | [排程與部署](issues/08-scheduling-and-deployment.md) | 06 | |
+| 07 | [隔日對帳](issues/07-next-day-reconciliation.md) | 04 | ⛔ **blocked**：對帳的資料來源不存在 |
+| 08 | [排程與部署](issues/08-scheduling-and-deployment.md) | 06 | 🟡 卡在結算日出場時間待定案 |
 | 09 | [成交查詢後備](issues/09-fill-query-fallback.md) | 05、06 | 強化，優先度低於 06／07 |
 
 ## 🚦 真錢里程碑
