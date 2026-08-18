@@ -13,7 +13,7 @@ import pytest
 
 from broker import BUY, MTX_CODE, OpenPrices, SELL, TMF_CODE, TX_CODE
 from broker.fake import FakeBroker
-from conftest import CONTRACTS, RecordingNotifier, make_config, state_path
+from conftest import CONTRACTS, RecordingNotifier, make_config, observations_path, state_path
 from main import run_entry
 from state import PositionRecord, read_position, write_position
 
@@ -42,6 +42,8 @@ def _run(opens, cfg=None, broker=None, today=D):
         notify=notifier,
         sleep=lambda _s: None,
         state_path=state_path(),
+        observations_path=observations_path(),
+        fetch_official=lambda day: None,
     )
     return outcome, notifier, broker
 

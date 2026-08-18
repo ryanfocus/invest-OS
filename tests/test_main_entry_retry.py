@@ -11,7 +11,7 @@
 
 from datetime import date
 
-from conftest import RecordingNotifier, make_config, state_path
+from conftest import RecordingNotifier, make_config, observations_path, state_path
 from broker import LoginFailed, OpenPrices, QuoteNotReady
 from broker.fake import FakeBroker
 from main import run_entry
@@ -32,6 +32,8 @@ def _run(broker, cfg=None):
         notify=notifier,
         sleep=lambda _seconds: None,   # 測試不真的睡；不對它做任何斷言
         state_path=state_path(),
+        observations_path=observations_path(),
+        fetch_official=lambda day: None,
     )
     return outcome, notifier
 

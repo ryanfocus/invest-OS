@@ -14,20 +14,18 @@
 
 from __future__ import annotations
 
-import csv
 import datetime
 import json
-import io
 import os
 import sys
 
-import requests
-
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, _ROOT)
 
-TAIFEX_CSV = "https://www.taifex.com.tw/cht/3/dlFutDataDown"
+# ⚠️ 這一行必須在上面的 sys.path.insert **之後**——taifex 住在專案根目錄，
+#    而這支工具是從 tools/ 執行的。
+from taifex import fetch_ohlc  # noqa: E402
 
 
 # ─────────────────────────────────────────────────────────────
@@ -38,54 +36,11 @@ TAIFEX_CSV = "https://www.taifex.com.tw/cht/3/dlFutDataDown"
 def taifex_open(commodity: str, date_str: str) -> dict | None:
     """取期交所某商品某日「一般交易時段」近月合約的 OHLC。
 
-    `commodity` 用期交所的商品代號：TX（大台）、MTX（小台）、TMF（微台）。
-    `date_str` 格式 `YYYY/MM/DD`。
+    ⚠️ **實作已搬到專案根目錄的 `taifex.py`**，讓正式程式（ticket 07 對帳）
+    與這支工具共用。CSV 的欄位位置與「一般／盤後」的篩選很容易寫錯，
+    兩份各自維護遲早會漂移，而漂移的那一份會**安靜地**對錯東西。
     """
-    resp = requests.post(
-        TAIFEX_CSV,
-        headers={"User-Agent": "Mozilla/5.0"},
-        data={
-            "down_type": "1",
-            "commodity_id": commodity,
-            "commodity_id2": "",
-            "queryStartDate": date_str,
-            "queryEndDate": date_str,
-        },
-        timeout=(10, 60),
-    )
-    text = resp.content.decode("ms950", errors="replace")
-
-    # ⚠️ 查詢範圍超過一個月時，期交所會回 HTML 錯誤頁但 HTTP 仍然是 200。
-    #    必須驗內容，只看狀態碼會把錯誤頁當成空資料。
-    if not text.startswith("交易日期"):
-        return None
-
-    candidates = []
-    for row in csv.reader(io.StringIO(text)):
-        # 欄位：0 交易日期 1 契約 2 到期月份 3 開盤 4 最高 5 最低 6 收盤 … 17 交易時段
-        if len(row) < 18 or row[1].strip() != commodity:
-            continue
-        month = row[2].strip()
-        if not month.isdigit() or row[17].strip() != "一般":
-            continue        # 排除週別合約與盤後（夜盤）時段
-        candidates.append((month, row))
-
-    if not candidates:
-        return None
-    candidates.sort()        # 月份最小的就是近月
-    month, row = candidates[0]
-
-    def num(value):
-        return float(value.strip().replace(",", ""))
-
-    return {
-        "month": month,
-        "open": num(row[3]),
-        "high": num(row[4]),
-        "low": num(row[5]),
-        "close": num(row[6]),
-        "volume": num(row[9]),
-    }
+    return fetch_ohlc(commodity, date_str)
 
 
 # ─────────────────────────────────────────────────────────────

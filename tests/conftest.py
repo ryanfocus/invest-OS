@@ -20,24 +20,36 @@ CONTRACTS = {
 
 
 _state_path = ""
+_observations_path = ""
 
 
 @pytest.fixture(autouse=True)
 def isolated_state_file(tmp_path):
-    """每個測試都有自己的狀態檔路徑，由 `state_path()` 取用。
+    """每個測試都有自己的狀態檔與觀測檔路徑。
 
-    `run_entry` 的 `state_path` 是必填參數，所以忘記傳會直接是 TypeError；
-    這個 fixture 負責提供那個路徑，讓測試不必各自處理。
+    `run_entry` 的 `state_path` / `observations_path` 都是必填參數，
+    所以忘記傳會直接是 TypeError；這個 fixture 負責提供那兩個路徑，
+    讓測試不必各自處理。
+
+    ⚠️ 兩個檔案**刻意分開命名**而不是共用一個路徑推導出來——
+    它們是不同的東西（部位／觀測），生命週期也不同（覆蓋／累積）。
     """
-    global _state_path
+    global _state_path, _observations_path
     _state_path = str(tmp_path / "position.json")
+    _observations_path = str(tmp_path / "observations.jsonl")
     yield tmp_path / "position.json"
     _state_path = ""
+    _observations_path = ""
 
 
 def state_path() -> str:
     """本次測試專用的狀態檔路徑。"""
     return _state_path
+
+
+def observations_path() -> str:
+    """本次測試專用的觀測記錄路徑。"""
+    return _observations_path
 
 
 class RecordingNotifier:

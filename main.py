@@ -32,9 +32,12 @@ from broker import (
     OrderRequest,
     ProductListUnavailable,
     QuoteNotReady,
+    TX_CODE,
     to_yyyymmdd,
 )
 from calendar_tw import is_trading_day
+from observations import OBSERVATIONS_PATH, Observation, append_observation
+from reconcile import run_reconciliation
 from state import (
     BY_EXIT,
     BY_SETTLEMENT,
@@ -200,6 +203,42 @@ def _place_entry_order(
     return result
 
 
+def _fetch_official_opens(trading_day: int):
+    """對帳的預設取數來源：期交所。
+
+    刻意做成一個函式而不是直接 import 到模組頂層——`taifex` 會拉進 `requests`，
+    而這個 import 若失敗，放在頂層會讓**整個 main.py 載不起來**（連訊號都發不出去）。
+    放在這裡，失敗就只是「今天沒對到帳」。
+    """
+    from taifex import fetch_official_opens
+    return fetch_official_opens(trading_day)
+
+
+def _record_observation(result, opens, contracts, today: date, path: str) -> None:
+    """留下今天這一筆觀測。**寫失敗只記 log，絕不往外拋。**
+
+    寫不進去的代價是「少對一天的帳」；讓例外冒出去的代價是**整天沒有訊號**，
+    而訊號才是這個系統的主要產出。兩者不成比例。
+
+    ⚠️ 但也不可以靜悄悄——這條路徑一旦長期失敗，隔日對帳會每天「沒東西可對」
+    而安靜跳過，看起來跟一切正常一模一樣。所以失敗記 ERROR。
+    """
+    try:
+        append_observation(
+            Observation(
+                trading_day=to_yyyymmdd(today),
+                tx=opens.tx, mtx=opens.mtx, tmf=opens.tmf,
+                signal=result.signal,
+                # 只記大台的月份。三個商品的近月理應相同，不同時上面
+                # 「只有部分商品到期」那條已經會以 WARNING 記錄。
+                contract_month=contracts[TX_CODE].contract_month,
+            ),
+            path=path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("觀測記錄寫入失敗（%s）：%s", type(exc).__name__, exc)
+
+
 def run_entry(
     config: Config,
     today: date,
@@ -208,14 +247,67 @@ def run_entry(
     *,
     sleep=time.sleep,
     state_path: str,
+    observations_path: str,
+    fetch_official=None,
 ) -> EntryOutcome:
-    """進場流程：登入 → 取開盤價（含重試）→ 算訊號 → 發報。
+    """進場那一班的完整流程：策略跑完，再對前一交易日的帳。
+
+    對帳刻意放在**這一層**而不是塞進策略流程裡：驗收條件要求它
+    「在訊號發報與下單全部完成之後才執行」，而策略流程有好幾個提前返回的出口。
+    包在外面就只有一個地方要顧，也不可能有哪條路徑漏掉。
+
+    `fetch_official` 是取官方資料的函式，預設連期交所。傳進來是為了讓測試
+    餵它壞東西（斷線、缺商品、格式看不懂）而不需要真的連外。
+    """
+    outcome = _run_entry(
+        config, today, broker, notify,
+        sleep=sleep, state_path=state_path, observations_path=observations_path,
+    )
+
+    # 非交易日與重複執行都不對帳（`skipped`）。
+    # 非交易日的約定是「不登入、不發任何訊息」，而對帳會連外抓資料；
+    # 重複執行那次的帳，同一天第一次跑的時候就對過了。
+    if not outcome.skipped:
+        # ⚠️ 預設取數函式**不在這裡 import**，而是包成一個延後 import 的小函式。
+        #    在這裡 import 的話，`import taifex` 失敗（缺 requests 等）會直接
+        #    冒出 run_entry——而那時候單已經送出去了，整班會以 traceback 結束。
+        #    包進函式裡，那個失敗就落在 `run_reconciliation` 的保護傘底下，
+        #    變成「對帳略過」而不是「當天掛掉」。驗收條件要的正是這個。
+        #
+        #    `run_reconciliation` 自己保證不拋例外，所以這裡不必再包一層 try。
+        #    那個保證有測試守著（test_reconcile.py 的「絕不礙事」那一組）。
+        result = run_reconciliation(
+            today=to_yyyymmdd(today),
+            notify=notify,
+            fetch_official=fetch_official or _fetch_official_opens,
+            path=observations_path,
+            discord_enabled=config.discord_enabled,
+        )
+        logger.info("對帳：%s",
+                    f"{result.checked_day} 一致" if result.checked_day and not result.mismatches
+                    else f"{result.checked_day} 不一致 {len(result.mismatches)} 項"
+                    if result.checked_day else f"略過（{result.skipped}）")
+
+    return outcome
+
+
+def _run_entry(
+    config: Config,
+    today: date,
+    broker,
+    notify,
+    *,
+    sleep=time.sleep,
+    state_path: str,
+    observations_path: str,
+) -> EntryOutcome:
+    """進場流程：登入 → 取開盤價（含重試）→ 算訊號 → 發報 → 寫觀測 → 下單。
 
     `notify` 是一個吃 payload、回傳是否成功的可呼叫物件。
 
-    `state_path` **刻意沒有預設值**。給了預設值的話，忘記傳的測試會靜靜地
-    讀寫專案裡真正的 `state/position.json`——那既會污染開發機的部位記錄，
-    也會讓測試結果取決於那個檔案當下的內容。現在忘記傳就是 TypeError。
+    `state_path` / `observations_path` **刻意都沒有預設值**。給了預設值的話，
+    忘記傳的測試會靜靜地讀寫專案裡真正的 `state/`——那既會污染開發機的記錄，
+    也會讓測試結果取決於那些檔案當下的內容。現在忘記傳就是 TypeError。
     """
 
     def _send(payload) -> bool:
@@ -357,6 +449,16 @@ def run_entry(
     # 發報在下單**之前**。訊號是這個系統的主要產出，下單是附加的；
     # 下單那一步失敗時，使用者至少已經收到今天該做什麼。
     notified = _send(build_signal_payload(result, today))
+
+    # 觀測記錄：**每個交易日都要留下一筆**，不動作與開關關著的日子也一樣。
+    # 那些日子沒有部位記錄，而隔日對帳唯一的依據就是這一筆（ticket 07）。
+    #
+    # 位置是刻意的：
+    #   發報**之後**——訊號是主要產出，不該被一個檔案寫入擋住
+    #   下單**之前**——觀測是既成事實，與後面下單成不成功無關；
+    #                   不動作的日子流程走到這裡就結束了，但這一行已經寫好
+    _record_observation(result, opens, contracts, today, observations_path)
+
     failed = lambda reason: _order_failed(  # noqa: E731
         reason, result=result, opens=opens, notified=notified,
         contracts=contracts, is_settlement_day=settlement,
@@ -657,7 +759,8 @@ def main(argv=None) -> int:
     today = date.today()
     if args.stage == "entry":
         outcome = run_entry(config, today=today, broker=broker, notify=notify,
-                            state_path=STATE_PATH)
+                            state_path=STATE_PATH,
+                            observations_path=OBSERVATIONS_PATH)
         logger.info("進場結束：訊號=%s exit_code=%s", outcome.signal, outcome.exit_code)
     else:
         outcome = run_exit(config, today=today, broker=broker, notify=notify,

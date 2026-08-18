@@ -18,7 +18,7 @@ import pytest
 
 from broker import BUY, EXIT, MTX_CODE, SELL
 from broker.fake import FakeBroker
-from conftest import RecordingNotifier, make_config, state_path
+from conftest import RecordingNotifier, make_config, observations_path, state_path
 from main import run_exit
 from state import UNCERTAIN, PositionRecord, read_position, write_position
 
@@ -428,6 +428,8 @@ def test_entry_records_the_last_trading_day_for_the_exit_to_use():
         notify=RecordingNotifier(),
         sleep=lambda _s: None,
         state_path=state_path(),
+        observations_path=observations_path(),
+        fetch_official=lambda day: None,
     )
     record = read_position(path=state_path())
     assert record.last_trading_day == 20260819
@@ -454,6 +456,8 @@ def test_settlement_day_entry_then_exit_sends_nothing():
         notify=RecordingNotifier(),
         sleep=lambda _s: None,
         state_path=state_path(),
+        observations_path=observations_path(),
+        fetch_official=lambda day: None,
     )
     broker = FakeBroker()
     _run(record=None, broker=broker, today=SETTLEMENT)

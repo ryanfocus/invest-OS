@@ -205,6 +205,33 @@ def build_exit_unknown_payload(record, reason: str, trading_date: date) -> dict:
     return {"content": "\n".join(lines)}
 
 
+def build_reconciliation_payload(trading_day: int, mismatches) -> dict:
+    """隔日對帳發現前一交易日的開盤價與期交所對不上。
+
+    **這一則是給人追查用的，所以兩邊的數字都要寫出來。**
+    只說「不一致」的話，收到的人還是得自己去期交所查一次才知道差多少、
+    差在哪個商品——那個摩擦足以讓這則訊息長期被忽略。
+
+    三個商品同時不一致時特別要看：那正是**取到錯誤盤別**的樣子
+    （單一商品差幾點比較像雜訊，三個一起偏掉不是）。
+    """
+    day = f"{trading_day // 10000:04d}/{trading_day // 100 % 100:02d}/{trading_day % 100:02d}"
+    lines = [
+        f"{day} OS 對帳",
+        "⚠️ **開盤價與期交所對不上**",
+        "",
+    ]
+    for m in mismatches:
+        lines.append(f"{m.product}：我們記的 **{m.ours:.0f}**，期交所 **{m.official:.0f}**")
+    if len(mismatches) == 3:
+        lines += [
+            "",
+            "**三個商品同時對不上**——這比較像取到錯誤的盤別（夜盤而非 AM 盤），"
+            "不像單純的數字誤差。當日訊號可能是錯的。",
+        ]
+    return {"content": "\n".join(lines)}
+
+
 def build_exit_state_broken_payload(reason: str, trading_date: date) -> dict:
     """出場時狀態檔讀不懂。
 
