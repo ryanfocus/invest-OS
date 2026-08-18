@@ -202,21 +202,103 @@ def test_a_failed_exit_is_not_recorded_as_exited():
     assert read_position(path=state_path()).exited is False
 
 
-def test_settlement_day_does_not_retry():
-    """結算日 13:30 後合約已停止交易，重試必然失敗且拖延告警。
+# --- 結算日：**一張單都不送** ---
+#
+# 合約 13:30 停止交易，13:40 這一班送什麼都會被拒；而未平倉部位本來就會由
+# 交易所以最後結算價現金交割，部位一定會平掉。所以正確行為不是「少重試幾次」，
+# 是**根本不送**。策略作者的決定：「結算就讓他進結算吧」。
+#
+# 代價是當日出場價變成現貨指數的結算價，與用期貨價的回測有落差——已知且有界。
 
-    未平倉部位會被交易所現金結算，所以重試沒有意義——
-    重點是**趕快告訴使用者**，不是多試兩次。
 
-    寫法：安排「第一次失敗、第二次會成功」。有重試的話結果是成功，
-    沒重試就是失敗——用**結果**分辨，不去數呼叫次數（那是實作細節）。
+def test_settlement_day_sends_no_exit_order_at_all():
+    """不是「少試幾次」，是一次都不試。
+
+    用**下單紀錄**斷言而不是用結果：安排「第一次失敗、第二次會成功」時，
+    舊的「只送一次」規則同樣會失敗收場，光看 exit_code 分不出兩者。
     """
     from broker import OrderFailed
     broker = FakeBroker(order_error=[OrderFailed("合約已停止交易"), None])
-    outcome, notifier, _ = _run(_record(trading_day=20260819),
-                                broker=broker, today=SETTLEMENT)
-    assert outcome.exit_code != 0, "結算日不重試，所以第二次的成功拿不到"
-    assert notifier.sent != [], "而且要立刻告訴使用者"
+    outcome, _, _ = _run(_record(trading_day=20260819),
+                         broker=broker, today=SETTLEMENT)
+    assert broker.orders == [], "結算日不送出場委託"
+    assert outcome.exit_code == 0, "交易所會結算，這不是失敗"
+
+
+def test_settlement_day_still_tells_the_user_once():
+    """一則告知。不發的話，使用者會以為 13:40 那班掛了。"""
+    _, notifier, _ = _run(_record(trading_day=20260819), today=SETTLEMENT)
+    assert len(notifier.sent) == 1
+    text = notifier.sent[0]["content"]
+    assert "結算" in text
+
+
+def test_the_settlement_notice_does_not_ask_for_manual_action():
+    """**這一則不能長得像告警。**
+
+    舊行為在結算日會發出「請立刻手動送出：賣出 2 口 MTX08」——
+    那是一件做不到的事，合約已經停止交易了。照著做只會在別的月份開新倉。
+    """
+    _, notifier, _ = _run(_record(trading_day=20260819), today=SETTLEMENT)
+    text = notifier.sent[0]["content"]
+    assert "手動" not in text
+    assert "🚨" not in text
+
+
+def test_the_settlement_notice_says_the_price_comes_from_the_spot_index():
+    """結算價是現貨指數的平均，不是期貨價，所以當日損益跟回測對不起來。
+
+    不先講的話，日後查帳時那個落差看起來會像程式算錯。
+    """
+    _, notifier, _ = _run(_record(trading_day=20260819), today=SETTLEMENT)
+    text = notifier.sent[0]["content"]
+    assert "現貨" in text
+
+
+def test_settlement_marks_the_record_closed_by_settlement():
+    """不標記的話，隔日對帳會看到一筆「還有 2 口沒出場」的記錄——
+    那是個看起來很確定的錯誤，帳上其實已經被結算掉了。
+
+    而且要與「我們自己平掉的」分得出來：兩者的出場價來源不同。
+    """
+    from state import BY_SETTLEMENT
+    _run(_record(trading_day=20260819), today=SETTLEMENT)
+    record = read_position(path=state_path())
+    assert record.exited is True
+    assert record.close_reason == BY_SETTLEMENT
+
+
+def test_an_ordinary_exit_is_marked_as_closed_by_us():
+    """對照組：一般日平掉的記錄，出場價是期貨價。"""
+    from state import BY_EXIT
+    _run(_record())
+    assert read_position(path=state_path()).close_reason == BY_EXIT
+
+
+def test_settlement_day_does_not_send_even_when_the_switch_is_off():
+    """開關關著＋結算日：舊路徑會發「部位過夜沒人知道」的告警，但它不會過夜。
+
+    走到開關那條的訊息會叫使用者去手動平倉——同樣是做不到的事。
+    """
+    _, notifier, broker = _run(_record(trading_day=20260819),
+                               cfg=make_config(auto_order_enabled=False),
+                               today=SETTLEMENT)
+    assert broker.orders == []
+    assert "手動" not in notifier.sent[0]["content"]
+
+
+def test_settlement_day_with_an_uncertain_record_still_flags_the_uncertainty():
+    """部位會照樣被結算，但**早上不知道成交幾口這件事，結算不會補上**。
+
+    只發一則平靜的「已結算」而不提這個，使用者就永遠不會去對這筆帳。
+    """
+    _, notifier, broker = _run(
+        _record(trading_day=20260819, lots=None, status=UNCERTAIN),
+        today=SETTLEMENT,
+    )
+    assert broker.orders == [], "不確定持有幾口，更不能送單"
+    text = notifier.sent[0]["content"]
+    assert "不知道" in text and "對帳" in text
 
 
 def test_an_ordinary_day_does_retry():
@@ -352,14 +434,17 @@ def test_entry_records_the_last_trading_day_for_the_exit_to_use():
     assert record.is_settlement_day(SETTLEMENT) is True
 
 
-def test_settlement_day_entry_then_exit_does_not_retry():
-    """端到端：結算日進場 → 結算日出場失敗 → **只送一次**。
+def test_settlement_day_entry_then_exit_sends_nothing():
+    """端到端：結算日進場 → 13:40 那班**一張單都不送**。
 
-    這條走的是真正的資料流（進場寫、出場讀），不是手工組的記錄。
+    這條走的是真正的資料流（進場寫 `last_trading_day`、出場讀），
+    不是手工組的記錄——突變測試確認過，進場漏寫那個欄位時，
+    只用手工記錄的出場測試會全綠而結算日永遠判不出來。
     """
-    from broker import OpenPrices, OrderFailed
+    from broker import OpenPrices
     from conftest import CONTRACTS
     from main import run_entry
+    from state import BY_SETTLEMENT
 
     run_entry(
         make_config(auto_order_enabled=True),
@@ -370,9 +455,10 @@ def test_settlement_day_entry_then_exit_does_not_retry():
         sleep=lambda _s: None,
         state_path=state_path(),
     )
-    broker = FakeBroker(order_error=OrderFailed("合約已停止交易"))
+    broker = FakeBroker()
     _run(record=None, broker=broker, today=SETTLEMENT)
-    assert len(broker.orders) == 1, "結算日不重試"
+    assert broker.orders == [], "結算日不送出場委託"
+    assert read_position(path=state_path()).close_reason == BY_SETTLEMENT
 
 
 def test_a_zero_fill_exit_leaves_the_whole_position():

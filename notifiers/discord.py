@@ -149,6 +149,40 @@ def build_exit_blocked_payload(record, trading_date: date) -> dict:
     return {"content": "\n".join(lines)}
 
 
+def build_settlement_payload(record, trading_date: date) -> dict:
+    """結算日**刻意不送出場委託**——合約到期，部位由交易所現金交割。
+
+    這一則是**告知，不是告警**。與「出場失敗」那一則刻意用不同的語氣與圖示：
+    那一則的意思是「部位還在，請立刻手動送出這張單」，這一則是
+    「什麼都不用做」。兩者長得像的話，使用者遲早會在 13:30 之後衝去下一張
+    送不出去的單——合約那時已經停止交易。
+
+    訊息一定要寫結算價的來源。最後結算價是**現貨指數**的平均，不是期貨價，
+    所以當天的實際損益本來就會與回測對不起來；不先講，日後對帳時
+    那個落差看起來會像程式算錯。
+    """
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "📅 **結算日，部位交由交易所現金結算**",
+        "",
+        f"未送出出場委託。{record.order_code}（{record.contract_month}）"
+        f"{_SIDE_TEXT.get(record.side, record.side)}的部位會以最後結算價交割。",
+        "最後結算價＝當日 13:00–13:30 加權指數每筆成交價的簡單算術平均"
+        "（**現貨指數，不是期貨價**），所以當日損益會與回測有落差。",
+    ]
+    if record.is_uncertain:
+        # 部位照樣會被結算，但我們從早上就不知道成交幾口——結算不會補上這個資訊。
+        lines += [
+            "",
+            "⚠️ 但早上沒收到成交回報，**系統不知道實際成交了幾口**"
+            f"（委託 {record.requested_lots} 口，序號 {record.order_seq or '未取得'}）。",
+            "部位會照樣被結算，請自行對帳確認。",
+        ]
+    else:
+        lines += ["", f"實際持有 {record.lots} 口。不需要處理。"]
+    return {"content": "\n".join(lines)}
+
+
 def build_exit_unknown_payload(record, reason: str, trading_date: date) -> dict:
     """出場單送出去了，但**收不到回報**——不知道平掉沒有。
 

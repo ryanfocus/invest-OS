@@ -44,6 +44,18 @@ CONFIRMED = "CONFIRMED"
 UNCERTAIN = "UNCERTAIN"
 _STATUSES = (CONFIRMED, UNCERTAIN)
 
+# 部位是**怎麼**了結的。兩種結局在帳上都是「沒有部位」，但價格來源不同：
+#
+# `BY_EXIT`        我們自己送出反向委託平掉，成交價是期貨價——回測假設的就是這個。
+# `BY_SETTLEMENT`  結算日沒送單，合約到期由交易所現金交割。結算價是
+#                  **13:00–13:30 加權指數每筆成交價的簡單算術平均**，那是現貨指數。
+#
+# ⚠️ 分開記是為了日後查帳：結算日的實際損益本來就會與用期貨價計算的回測有落差，
+#    沒有這個欄位的話，那個落差看起來會像程式算錯。
+BY_EXIT = "EXIT"
+BY_SETTLEMENT = "SETTLEMENT"
+_CLOSE_REASONS = (BY_EXIT, BY_SETTLEMENT)
+
 
 @dataclass(frozen=True)
 class PositionRecord:
@@ -86,6 +98,9 @@ class PositionRecord:
     # 已經平倉了嗎。**部分成交不算**——只平掉一部分時這裡維持 False，
     # 否則隔日對帳會以為一切正常，而殘留的口數還在帳上。
     exited: bool = False
+    # 了結的方式（`BY_EXIT` / `BY_SETTLEMENT`），未了結時為空字串。
+    # `exited` 回答「還要不要送單」，這個欄位回答「當天的出場價是哪來的」。
+    close_reason: str = ""
 
     def __post_init__(self) -> None:
         """殘缺或自相矛盾的記錄比沒有記錄更糟——出場那一班會拿著它去下單。
@@ -107,6 +122,18 @@ class PositionRecord:
             raise ValueError(
                 f"CONFIRMED 的記錄必須有實際口數且 ≥ 1，目前是 {self.lots}"
             )
+        # `exited` 與 `close_reason` 必須同進同退。少了理由的已了結記錄，
+        # 日後查帳分不出「我們平掉的」與「交易所結算掉的」；而有理由卻沒了結，
+        # 出場那班會照常送單去平一個記錄說已經沒有的部位。
+        if self.exited and self.close_reason not in _CLOSE_REASONS:
+            raise ValueError(
+                f"已了結的記錄必須註明方式，只能是 {list(_CLOSE_REASONS)}，"
+                f"目前是 {self.close_reason!r}"
+            )
+        if not self.exited and self.close_reason:
+            raise ValueError(
+                f"尚未了結的記錄不該有了結方式（目前是 {self.close_reason!r}）"
+            )
 
     @property
     def exit_side(self) -> str:
@@ -120,7 +147,8 @@ class PositionRecord:
         return SELL if self.side == BUY else BUY
 
     def is_settlement_day(self, day) -> bool:
-        """今天是不是這個合約的最後交易日。結算日的出場**不重試**。"""
+        """今天是不是這個合約的最後交易日。**結算日不送出場委託**——
+        合約 13:30 停止交易，未平倉部位由交易所以最後結算價現金交割。"""
         from broker import to_yyyymmdd
         return self.last_trading_day == to_yyyymmdd(day)
 

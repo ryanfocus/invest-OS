@@ -19,6 +19,8 @@ import pytest
 
 from broker import BUY, MTX_CODE, SELL
 from state import (
+    BY_EXIT,
+    BY_SETTLEMENT,
     CONFIRMED,
     UNCERTAIN,
     PositionRecord,
@@ -145,6 +147,53 @@ def test_uncertain_records_are_flagged_for_the_exit_flow():
     )
     assert uncertain.is_uncertain is True
     assert RECORD.is_uncertain is False
+
+
+# --- 了結方式：`exited` 說「還要不要送單」，`close_reason` 說「出場價哪來的」---
+#
+# 兩種結局在帳上都是「沒有部位」，但價格來源完全不同：
+#   我們自己平掉   → 期貨成交價，回測假設的就是這個
+#   交易所現金結算 → 13:00–13:30 加權指數的簡單算術平均，那是**現貨指數**
+# 分不出來的話，結算日那天的損益落差看起來會像程式算錯。
+
+
+def test_a_closed_record_must_say_how_it_was_closed():
+    with pytest.raises(ValueError, match="了結"):
+        PositionRecord(
+            trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+            contract_month="202608", requested_lots=2, last_trading_day=20260819,
+            side=BUY, lots=2, exited=True,
+        )
+
+
+def test_an_open_record_must_not_claim_a_close_reason():
+    """反過來也要擋：有了結方式卻沒了結，出場那班會照常送單去平一個
+    記錄說已經沒有的部位。"""
+    with pytest.raises(ValueError, match="尚未了結"):
+        PositionRecord(
+            trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+            contract_month="202608", requested_lots=2, last_trading_day=20260819,
+            side=BUY, lots=2, exited=False, close_reason=BY_EXIT,
+        )
+
+
+def test_an_unknown_close_reason_is_rejected():
+    with pytest.raises(ValueError, match="了結"):
+        PositionRecord(
+            trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+            contract_month="202608", requested_lots=2, last_trading_day=20260819,
+            side=BUY, lots=2, exited=True, close_reason="GONE",
+        )
+
+
+def test_both_close_reasons_survive_a_write_and_read(tmp_path):
+    """`read_position` 會擋掉不認得的欄位，所以新欄位要有一條真的寫進檔案再讀回來。"""
+    from dataclasses import replace
+    path = tmp_path / "position.json"
+    for reason in (BY_EXIT, BY_SETTLEMENT):
+        record = replace(RECORD, exited=True, close_reason=reason)
+        write_position(record, path=str(path))
+        assert read_position(path=str(path)) == record
 
 
 # --- 壞掉的檔案不可以看起來像「沒有部位」 ---

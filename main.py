@@ -36,6 +36,8 @@ from broker import (
 )
 from calendar_tw import is_trading_day
 from state import (
+    BY_EXIT,
+    BY_SETTLEMENT,
     STATE_PATH,
     UNCERTAIN,
     PositionRecord,
@@ -50,6 +52,7 @@ from notifiers.discord import (
     build_exit_unknown_payload,
     build_fill_unknown_payload,
     build_partial_exit_payload,
+    build_settlement_payload,
     build_no_signal_payload,
     build_order_failed_payload,
     build_signal_payload,
@@ -468,6 +471,25 @@ def run_exit(
         logger.info("今日部位已出場，不重複送單")
         return _quiet()
 
+    if record.is_settlement_day(today):
+        # **結算日不送出場委託。** 合約 13:30 就停止交易，13:40 這一班送什麼都會被拒，
+        # 而未平倉部位本來就會由交易所以最後結算價現金交割——部位一定會平掉。
+        #
+        # 這一段刻意放在「不確定」與「開關關閉」的前面：那兩條的作用是**阻止送單**，
+        # 而結算日本來就不送，走到那邊只會發出一則叫使用者去做一件做不到的事的告警
+        # （「請立刻手動送出賣出 N 口」——合約已經不能交易了）。
+        # 不確定的情況改由本則訊息一併講清楚。
+        #
+        # 代價是當日損益以現貨指數的結算價計算，與用期貨價的回測有落差。
+        # 那是已知且有界的，不是風險——見 SPEC「結算日」。
+        logger.info("今天是結算日，部位交由交易所現金結算，不送出場委託")
+        write_position(
+            replace(record, exited=True, close_reason=BY_SETTLEMENT),
+            path=state_path,
+        )
+        notified = _send(build_settlement_payload(record, today))
+        return ExitOutcome(exited=True, remaining=0, notified=notified, exit_code=0)
+
     if record.is_uncertain:
         # ticket 05 定的契約：不知道持有幾口就不准下單。
         reason = "不確定持有幾口，未自動出場"
@@ -494,12 +516,8 @@ def run_exit(
         lots=record.lots,
         intent=EXIT,
     )
-    # 結算日合約 13:30 就停止交易，重試必然失敗、只會拖延告警。
-    # 未平倉部位由交易所現金結算，所以重點是**趕快通知人**，不是多試兩次。
-    settlement = record.is_settlement_day(today)
-    attempts = 1 if settlement else config.quote_retry_attempts
-    if settlement:
-        logger.info("今天是結算日，出場不重試")
+    # 結算日在上面就回去了，走到這裡一定是一般交易日。
+    attempts = config.quote_retry_attempts
 
     # 登入放在重試迴圈**外面**：重試的是委託，不是身分驗證。
     # 而且真正的 login() 會重新驗證憑證並等聲明書，每次重試都做一遍很浪費。
@@ -562,7 +580,7 @@ def run_exit(
                            exit_code=1, failure=reason)
 
     logger.info("出場完成，平掉 %d 口", result.filled_lots)
-    write_position(replace(record, exited=True), path=state_path)
+    write_position(replace(record, exited=True, close_reason=BY_EXIT), path=state_path)
     # 例行出場不發 Discord——使用者要求每天只有一則訊息（早上那則訊號）。
     return ExitOutcome(exited=True, remaining=0, notified=False, exit_code=0)
 
