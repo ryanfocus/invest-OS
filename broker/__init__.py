@@ -99,6 +99,17 @@ def to_yyyymmdd(day) -> int:
     return int(day.strftime("%Y%m%d"))
 
 
+def format_yyyymmdd(day: int, sep: str = "/") -> str:
+    """`20260810` → `2026/08/10`。給人看的、以及期交所查詢參數用的格式。
+
+    收在這裡而不是各處自己拆位數：那串
+    `f"{d // 10000:04d}/{d // 100 % 100:02d}/{d % 100:02d}"` 原本逐字重複在
+    `taifex` 與 Discord 訊息裡，而寫錯的後果是**查錯日期的資料**——
+    然後拿去跟另一天的觀測比對，報一個看起來很真實的不一致。
+    """
+    return f"{day // 10000:04d}{sep}{day // 100 % 100:02d}{sep}{day % 100:02d}"
+
+
 @dataclass(frozen=True)
 class Quote:
     """單一商品的報價。價格已還原小數（群益回傳為整數且放大 100 倍）。

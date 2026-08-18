@@ -25,7 +25,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from observations import read_observation_before
+from observations import read_observations
 
 logger = logging.getLogger(__name__)
 
@@ -103,12 +103,22 @@ def run_reconciliation(
     測試要能餵它壞東西（缺商品、拋例外、回 None）而不需要真的連線。
     """
     try:
-        observation = read_observation_before(today, path=path)
+        records, damaged = read_observations(path)
     except Exception as exc:  # noqa: BLE001
-        # 觀測檔讀不懂。這是真的壞了，要在 log 裡看得見——
-        # 但不發 Discord、不影響結束狀態（ticket 07 的驗收條件）。
-        logger.error("對帳略過：觀測記錄讀不懂：%s", exc)
-        return ReconcileOutcome(checked_day=None, skipped=f"觀測記錄讀不懂：{exc}")
+        # 檔案層級的問題（權限、磁碟）。行層級的問題不走這裡，見下面的 `damaged`。
+        logger.error("對帳略過：觀測檔讀不到：%s", exc)
+        return ReconcileOutcome(checked_day=None, skipped=f"觀測檔讀不到：{exc}")
+
+    if damaged:
+        # ⚠️ **這一則一定要發。** 壞掉的行只會影響它自己那一天，其餘照常運作——
+        #    正因為如此，不講的話沒有任何跡象：對帳照跑、觀測照寫，
+        #    只是稽核歷史缺了幾天，而缺的那幾天看起來就像「那天沒跑」。
+        #    這是 code-review 2026-08-18 抓到的：初版連這個都只寫 log。
+        logger.error("觀測記錄有 %d 行讀不懂：%s", len(damaged), damaged)
+        _notify(notify, discord_enabled, lambda: _damage_payload(path, damaged))
+
+    before = [r for r in records if r.trading_day < today]
+    observation = max(before, key=lambda r: r.trading_day) if before else None
 
     if observation is None:
         logger.info("對帳略過：沒有 %s 之前的觀測記錄", today)
@@ -143,18 +153,39 @@ def run_reconciliation(
         logger.error("對帳不一致：%s %s 我們=%s 期交所=%s",
                      observation.trading_day, m.product, m.ours, m.official)
 
-    notified = False
-    if discord_enabled:
-        from notifiers.discord import build_reconciliation_payload
-        try:
-            notified = bool(notify(build_reconciliation_payload(
-                observation.trading_day, mismatches)))
-        except Exception as exc:  # noqa: BLE001
-            # webhook 掛掉不該把整班拖下水。不一致本身已經記進 log 了。
-            logger.error("對帳告警送不出去：%s", exc)
+    notified = _notify(notify, discord_enabled, lambda: _mismatch_payload(
+        observation.trading_day, mismatches))
 
     return ReconcileOutcome(
         checked_day=observation.trading_day,
         mismatches=mismatches,
         notified=notified,
     )
+
+
+def _notify(notify, enabled: bool, build) -> bool:
+    """發一則告警。**任何環節出錯都只記 log。**
+
+    ⚠️ `build` 是個函式而不是現成的 payload，因為組裝訊息需要 import
+    `notifiers.discord`——那個 import 若失敗（相依缺失、模組寫壞），
+    放在 try 外面就會冒出 `run_reconciliation`，而那時候單已經送出去了，
+    整班會以 traceback 結束。初版正是這樣寫的（code-review 2026-08-18 抓到）：
+    對 `taifex` 做對了延後 import 的保護，卻在同一個模組裡犯了同一類錯。
+    """
+    if not enabled:
+        return False
+    try:
+        return bool(notify(build()))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("對帳告警送不出去：%s", exc)
+        return False
+
+
+def _mismatch_payload(trading_day: int, mismatches):
+    from notifiers.discord import build_reconciliation_payload
+    return build_reconciliation_payload(trading_day, mismatches)
+
+
+def _damage_payload(path: str, damaged):
+    from notifiers.discord import build_observation_damaged_payload
+    return build_observation_damaged_payload(path, damaged)

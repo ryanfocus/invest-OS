@@ -1,31 +1,19 @@
 """當日觀測記錄 —— 「今天看到了什麼」。
 
-與部位狀態檔（`state.py`）刻意分成兩個檔案，因為它們是兩件不同的事：
+**兩份記錄的分工與生命週期見 [SPEC](docs/SPEC.md) 的「兩份記錄，兩種生命週期」**，
+詞彙定義見 `CONTEXT.md` 的「當日觀測」。這裡只寫程式碼層面的三個決定：
 
-| | 部位記錄 `position.json` | 觀測記錄 `observations.jsonl` |
-|---|---|---|
-| 內容 | OS 帳上有什麼部位 | 今天看到的三個開盤價與訊號 |
-| 何時寫 | **只有真的下單那天** | **每個交易日，無例外** |
-| 不動作的日子 | 不寫 | 寫 |
-| 開關關閉時 | 不寫 | 寫 |
-| 保存方式 | 覆蓋，只留當天 | 累積，一天一行 |
-| 誰讀 | 當天 13:40 的出場 | 隔天早上的對帳（ticket 07） |
-
-**為什麼不把欄位加進 `PositionRecord` 就好**：那個型別的不變量是繞著
+**一、為什麼不把欄位加進 `PositionRecord` 就好。** 那個型別的不變量是繞著
 「有部位」建立的（`lots` 與 `status` 綁死、`CONFIRMED` 必須有口數 ≥ 1、
 `exited` 必須有 `close_reason`）。而觀測記錄最常見的一天恰恰是**沒有部位**——
 不動作佔 23.2% 的交易日，開關關著更是目前的每一天。
 硬塞會迫使那些不變量放寬，而它們正是 ticket 05 整張票建立起來的防線。
 
-**這個檔案存在的理由**（2026-08-17 盤點時發現的洞）：ticket 07 的對帳
-需要「前一交易日記錄的三個開盤價」，但那三個數字當時只活在記憶體、
-Discord 的中文訊息、與日誌裡——**沒有一個程式讀得回來**。
-於是 SPEC 承諾的「第一階段只跑訊號、零金錢風險驗證資料正確性」
-在機制上並不存在。
-
-用 JSONL（一行一筆 JSON）而不是單一 JSON 陣列：append 是一次寫入，
+**二、為什麼用 JSONL 而不是單一 JSON 陣列。** append 是一次寫入，
 不必先讀進整份再整份寫回去——後者在中途斷電時會毀掉**歷史**，
 而這份檔案的價值正是歷史。
+
+**三、為什麼壞掉的行是跳過而不是拋例外。** 見 `read_observations`。
 """
 
 from __future__ import annotations
@@ -35,18 +23,13 @@ import logging
 import os
 from dataclasses import asdict, dataclass, fields
 
+# `strategy` 不 import 任何專案內模組，所以放在頂層不會有循環依賴。
+from strategy import LONG, NO_TRADE, SHORT
+
 logger = logging.getLogger(__name__)
 
 _ROOT = os.path.dirname(os.path.abspath(__file__))
 OBSERVATIONS_PATH = os.path.join(_ROOT, "state", "observations.jsonl")
-
-
-class ObservationUnreadable(Exception):
-    """觀測記錄存在但讀不懂。**不可以當成「沒有觀測」處理。**
-
-    對帳本來就設計成「沒東西可對就安靜結束」（開機第一天、連假都屬此類）。
-    讀不懂若也走那條路，兩者長得一模一樣，檔案壞掉這件事就永遠不會浮出來。
-    """
 
 
 class ObservationConflict(Exception):
@@ -89,7 +72,6 @@ class Observation:
                 # 而真正的問題（報價沒就緒卻照樣算了訊號）反而被蓋掉。
                 raise ValueError(f"{name} 的開盤價必須大於 0，目前是 {value}")
 
-        from strategy import LONG, NO_TRADE, SHORT
         if self.signal not in (LONG, SHORT, NO_TRADE):
             raise ValueError(f"未知的訊號 {self.signal!r}")
 
@@ -132,6 +114,59 @@ def append_observation(record: Observation, path: str = OBSERVATIONS_PATH) -> No
                 record.signal, record.contract_month)
 
 
+def read_observations(
+    path: str = OBSERVATIONS_PATH,
+) -> tuple[list[Observation], list[str]]:
+    """讀出全部觀測，回傳 `(讀得懂的記錄, 讀不懂的行的問題描述)`。
+
+    **壞掉的行跳過，但一定要回報。** 這兩件事缺一不可，而初版兩件都做錯了：
+    它讀到壞行就拋例外，於是
+
+      一行壞掉 → append 讀不到既有記錄 → 之後**再也寫不進任何觀測**
+               → 對帳每天在「讀不懂」返回 → **永遠不再對帳**
+               → 而且全程只進 log，一則告警都不發
+
+    整個稽核能力會安靜地、永久地消失，而系統看起來完全正常——
+    那正是本模組要防的那種錯誤，發生在它自己身上（code-review 2026-08-18 實測）。
+
+    現在壞行只影響它自己那一天，其餘照常；而 `damaged` 讓呼叫端發得出告警。
+    「讀不懂不可以看起來像沒有觀測」這個原本的顧慮，由**回報**滿足，
+    不必靠**停擺**。
+    """
+    if not os.path.exists(path):
+        # 檔案不存在就是「還沒有觀測」——開機第一天，正常，不是故障。
+        return [], []
+
+    records: list[Observation] = []
+    damaged: list[str] = []
+    known = {f.name for f in fields(Observation)}
+    with open(path, encoding="utf-8") as fh:
+        for number, line in enumerate(fh, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            problem = ""
+            try:
+                data = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                problem = f"解析失敗：{exc}"
+            else:
+                if not isinstance(data, dict):
+                    problem = f"不是物件：{type(data).__name__}"
+                elif set(data) - known:
+                    # 欄位改名時不可以靜靜地少對一個商品。
+                    problem = f"有不認得的欄位：{sorted(set(data) - known)}"
+                else:
+                    try:
+                        records.append(Observation(**data))
+                    except (TypeError, ValueError) as exc:
+                        # 檔案是人可以手改的，所以建構時的不變量在這裡要再驗一次。
+                        problem = f"內容有問題：{exc}"
+            if problem:
+                damaged.append(f"第 {number} 行{problem}")
+    return records, damaged
+
+
 def read_observation_before(
     day: int, path: str = OBSERVATIONS_PATH
 ) -> Observation | None:
@@ -143,52 +178,18 @@ def read_observation_before(
 
     隔了幾天（連假、上次沒跑）照樣回傳。官方資料查得到就查得到，
     日期久遠不影響正確性；跳過的話「上週五取到錯誤盤別」就永遠沒人發現。
+
+    ⚠️ 這個便利函式**丟掉了損壞資訊**。在意的呼叫端（對帳）要用
+    `read_observations`，否則檔案壞掉這件事又會沒有人知道。
     """
-    latest = None
-    for record in _iter_observations(path):
-        if record.trading_day < day and (
-            latest is None or record.trading_day > latest.trading_day
-        ):
-            latest = record
-    return latest
+    records, _ = read_observations(path)
+    before = [r for r in records if r.trading_day < day]
+    return max(before, key=lambda r: r.trading_day) if before else None
 
 
 def _read_day(day: int, path: str) -> Observation | None:
-    for record in _iter_observations(path):
+    records, _ = read_observations(path)
+    for record in records:
         if record.trading_day == day:
             return record
     return None
-
-
-def _iter_observations(path: str):
-    """逐行讀出。檔案不存在就是「還沒有觀測」——那是正常的，不是故障。"""
-    if not os.path.exists(path):
-        return
-
-    known = {f.name for f in fields(Observation)}
-    with open(path, encoding="utf-8") as fh:
-        for number, line in enumerate(fh, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-                raise ObservationUnreadable(
-                    f"{path} 第 {number} 行解析失敗：{exc}"
-                ) from exc
-            if not isinstance(data, dict):
-                raise ObservationUnreadable(
-                    f"{path} 第 {number} 行不是物件：{type(data).__name__}"
-                )
-            unexpected = set(data) - known
-            if unexpected:
-                raise ObservationUnreadable(
-                    f"{path} 第 {number} 行有不認得的欄位：{sorted(unexpected)}"
-                )
-            try:
-                yield Observation(**data)
-            except (TypeError, ValueError) as exc:
-                raise ObservationUnreadable(
-                    f"{path} 第 {number} 行內容有問題：{exc}"
-                ) from exc

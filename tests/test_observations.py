@@ -20,9 +20,9 @@ import pytest
 
 from observations import (
     Observation,
-    ObservationUnreadable,
     append_observation,
     read_observation_before,
+    read_observations,
 )
 from strategy import LONG, NO_TRADE, SHORT
 
@@ -133,40 +133,90 @@ def test_a_rerun_with_different_numbers_replaces_nothing_and_warns(tmp_path):
     assert len([x for x in open(p, encoding="utf-8") if x.strip()]) == 1
 
 
-# --- 壞掉的行不可以看起來像「沒有觀測」 ---
+# --- 壞掉的行：**跳過它，但要講出來** ---
+#
+# 初版是「讀到壞行就拋例外」，理由是「讀不懂當成沒有的話，對帳會靜默跳過
+# 而沒有人知道它壞了」。那個顧慮對，但那個解法**更糟**。code-review 實測：
+#
+#   一行壞掉 → append 讀不到既有記錄 → 之後**再也寫不進任何觀測**
+#            → 對帳每天都在「讀不懂」返回 → **永遠不再對帳**
+#            → 而且全程只進 log，**一則 Discord 都不發**
+#
+# 整個稽核能力會安靜地、永久地消失，而系統看起來完全正常——
+# 那正是本張票要防的那種錯誤，發生在它自己身上。
+#
+# 現在的設計：**壞行跳過（其餘照常運作），並把問題回報出去讓呼叫端發告警。**
+# 原本的顧慮由「回報」滿足，不必靠「停擺」。
 
 
-def test_an_unreadable_line_raises_instead_of_looking_empty(tmp_path):
-    """讀不懂就當成沒有的話，對帳會靜默跳過而沒有人知道它壞了——
+def test_a_damaged_line_does_not_hide_the_good_ones(tmp_path):
+    p = path(tmp_path)
+    append_observation(OBS, path=p)
+    _damage(p)
+    records, damaged = read_observations(path=p)
+    assert [r.trading_day for r in records] == [20260817]
+    assert len(damaged) == 1
 
-    而對帳本來就設計成「沒東西對就安靜結束」，
-    兩者長得一模一樣，故障因此永遠不會浮出來。
+
+def test_a_damaged_line_is_reported_not_swallowed(tmp_path):
+    """跳過而不講的話，就變成當初擔心的那件事：壞掉跟正常長得一樣。"""
+    p = path(tmp_path)
+    _damage(p)
+    _, damaged = read_observations(path=p)
+    assert damaged and "1" in damaged[0], "要講得出是第幾行"
+
+
+def test_writing_still_works_after_a_line_is_damaged(tmp_path):
+    """**這是初版最嚴重的後果。** 壞一行就再也記不下任何東西，
+
+    而且沒有人會知道——隔日對帳只會顯示「沒東西可對」，跟休假第一天一樣。
     """
     p = path(tmp_path)
     append_observation(OBS, path=p)
+    _damage(p)
+    append_observation(_at(20260818), path=p)
+    records, _ = read_observations(path=p)
+    assert [r.trading_day for r in records] == [20260817, 20260818]
+
+
+def test_reading_before_still_works_around_a_damaged_line(tmp_path):
+    p = path(tmp_path)
+    append_observation(OBS, path=p)
+    _damage(p)
+    assert read_observation_before(20260819, path=p).trading_day == 20260817
+
+
+def test_an_unknown_field_is_reported_as_damage(tmp_path):
+    """欄位改名時不可以靜靜地少對一個商品。"""
+    _write_raw(path(tmp_path), {**OBS.__dict__, "extra": 1})
+    records, damaged = read_observations(path=path(tmp_path))
+    assert records == [] and len(damaged) == 1
+
+
+def test_a_missing_field_is_reported_as_damage(tmp_path):
+    data = dict(OBS.__dict__)
+    del data["tmf"]
+    _write_raw(path(tmp_path), data)
+    records, damaged = read_observations(path=path(tmp_path))
+    assert records == [] and len(damaged) == 1
+
+
+def test_a_zero_open_price_on_disk_is_reported_as_damage(tmp_path):
+    """建構時擋得住，但檔案是人可以手改的。讀回來時也要擋。"""
+    _write_raw(path(tmp_path), {**OBS.__dict__, "tx": 0})
+    records, damaged = read_observations(path=path(tmp_path))
+    assert records == [] and len(damaged) == 1
+
+
+def _damage(p: str) -> None:
+    """在檔尾追加一行讀不懂的內容——寫到一半斷電就長這樣。"""
     with open(p, "a", encoding="utf-8") as fh:
-        fh.write("{壞掉的 JSON\n")
-    with pytest.raises(ObservationUnreadable):
-        read_observation_before(20260819, path=p)
+        fh.write("{截斷的" + chr(10))
 
 
-def test_an_unknown_field_is_rejected(tmp_path):
-    """欄位改名時要大聲失敗，不要靜靜地少對一個商品。"""
-    p = path(tmp_path)
+def _write_raw(p: str, data: dict) -> None:
     with open(p, "w", encoding="utf-8") as fh:
-        fh.write(json.dumps({**OBS.__dict__, "extra": 1}) + "\n")
-    with pytest.raises(ObservationUnreadable):
-        read_observation_before(20260819, path=p)
-
-
-def test_a_missing_field_is_rejected(tmp_path):
-    p = path(tmp_path)
-    with open(p, "w", encoding="utf-8") as fh:
-        data = dict(OBS.__dict__)
-        del data["tmf"]
-        fh.write(json.dumps(data) + "\n")
-    with pytest.raises(ObservationUnreadable):
-        read_observation_before(20260819, path=p)
+        fh.write(json.dumps(data) + chr(10))
 
 
 # --- 型別上就不可能記錄一筆沒有意義的觀測 ---

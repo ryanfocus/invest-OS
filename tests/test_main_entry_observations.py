@@ -127,6 +127,31 @@ def test_running_twice_in_a_day_records_one_line():
     assert len(lines) == 1
 
 
+def test_a_second_run_with_different_prices_raises_an_alert():
+    """同一天跑兩次很正常，**數字不一樣才是訊號**——
+
+    代表報價來源在同一天給了兩個答案，而這整個系統就建立在那三個數字上。
+    留下的只有第一筆，所以隔日對帳看不到這件事；不在當下講，就沒有人會知道。
+    """
+    _run(opens=LONG_OPENS)
+    _, notifier = _run(opens=OpenPrices(tx=42331, mtx=42298, tmf=99999))
+    assert "兩組不同的開盤價" in notifier.text
+
+
+def test_a_second_run_with_the_same_prices_stays_quiet():
+    """對照組：數字一樣就只是重跑，不該打擾人。"""
+    _run(opens=LONG_OPENS)
+    _, notifier = _run(opens=LONG_OPENS)
+    assert "兩組不同" not in notifier.text
+
+
+def test_the_first_record_wins_a_conflict():
+    """保留先寫入的那一筆——它比較接近 08:45。"""
+    _run(opens=LONG_OPENS)
+    _run(opens=OpenPrices(tx=42331, mtx=42298, tmf=99999))
+    assert _written().tmf == 42265
+
+
 # --- 記下來的內容 ---
 
 

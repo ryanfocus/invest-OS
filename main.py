@@ -36,7 +36,12 @@ from broker import (
     to_yyyymmdd,
 )
 from calendar_tw import is_trading_day
-from observations import OBSERVATIONS_PATH, Observation, append_observation
+from observations import (
+    OBSERVATIONS_PATH,
+    Observation,
+    ObservationConflict,
+    append_observation,
+)
 from reconcile import run_reconciliation
 from state import (
     BY_EXIT,
@@ -54,6 +59,7 @@ from notifiers.discord import (
     build_exit_state_broken_payload,
     build_exit_unknown_payload,
     build_fill_unknown_payload,
+    build_observation_conflict_payload,
     build_partial_exit_payload,
     build_settlement_payload,
     build_no_signal_payload,
@@ -214,8 +220,8 @@ def _fetch_official_opens(trading_day: int):
     return fetch_official_opens(trading_day)
 
 
-def _record_observation(result, opens, contracts, today: date, path: str) -> None:
-    """留下今天這一筆觀測。**寫失敗只記 log，絕不往外拋。**
+def _record_observation(result, opens, contracts, today: date, path: str, send) -> None:
+    """留下今天這一筆觀測。**寫失敗絕不往外拋。**
 
     寫不進去的代價是「少對一天的帳」；讓例外冒出去的代價是**整天沒有訊號**，
     而訊號才是這個系統的主要產出。兩者不成比例。
@@ -235,6 +241,17 @@ def _record_observation(result, opens, contracts, today: date, path: str) -> Non
             ),
             path=path,
         )
+    except ObservationConflict as exc:
+        # 同一天出現**兩組不同的開盤價**。這不是「重複執行」那麼單純——
+        # 報價來源在同一天給了兩個答案，而這個系統整個是建立在那三個數字上的。
+        #
+        # ⚠️ 一定要發出去。初版只記 log（code-review 2026-08-18 抓到），
+        #    於是這個例外形同虛設：唯一的呼叫端把它吞掉，沒有人會知道。
+        logger.error("%s", exc)
+        try:
+            send(build_observation_conflict_payload(to_yyyymmdd(today), str(exc)))
+        except Exception as send_exc:  # noqa: BLE001
+            logger.error("觀測衝突告警送不出去：%s", send_exc)
     except Exception as exc:  # noqa: BLE001
         logger.error("觀測記錄寫入失敗（%s）：%s", type(exc).__name__, exc)
 
@@ -252,14 +269,14 @@ def run_entry(
 ) -> EntryOutcome:
     """進場那一班的完整流程：策略跑完，再對前一交易日的帳。
 
-    對帳刻意放在**這一層**而不是塞進策略流程裡：驗收條件要求它
-    「在訊號發報與下單全部完成之後才執行」，而策略流程有好幾個提前返回的出口。
-    包在外面就只有一個地方要顧，也不可能有哪條路徑漏掉。
+    分成兩層是因為驗收條件要求對帳「在訊號發報與下單全部完成之後才執行」，
+    而策略流程（`_run_strategy`）有 6 個提前返回的出口。逐一補會漏，
+    包在外面只有一個地方要顧。兩者的差別就是**這一層多做了對帳**。
 
     `fetch_official` 是取官方資料的函式，預設連期交所。傳進來是為了讓測試
     餵它壞東西（斷線、缺商品、格式看不懂）而不需要真的連外。
     """
-    outcome = _run_entry(
+    outcome = _run_strategy(
         config, today, broker, notify,
         sleep=sleep, state_path=state_path, observations_path=observations_path,
     )
@@ -283,15 +300,17 @@ def run_entry(
             path=observations_path,
             discord_enabled=config.discord_enabled,
         )
-        logger.info("對帳：%s",
-                    f"{result.checked_day} 一致" if result.checked_day and not result.mismatches
-                    else f"{result.checked_day} 不一致 {len(result.mismatches)} 項"
-                    if result.checked_day else f"略過（{result.skipped}）")
+        if result.checked_day is None:
+            logger.info("對帳略過：%s", result.skipped)
+        elif result.mismatches:
+            logger.error("對帳：%s 有 %d 項不一致", result.checked_day, len(result.mismatches))
+        else:
+            logger.info("對帳：%s 一致", result.checked_day)
 
     return outcome
 
 
-def _run_entry(
+def _run_strategy(
     config: Config,
     today: date,
     broker,
@@ -457,7 +476,7 @@ def _run_entry(
     #   發報**之後**——訊號是主要產出，不該被一個檔案寫入擋住
     #   下單**之前**——觀測是既成事實，與後面下單成不成功無關；
     #                   不動作的日子流程走到這裡就結束了，但這一行已經寫好
-    _record_observation(result, opens, contracts, today, observations_path)
+    _record_observation(result, opens, contracts, today, observations_path, _send)
 
     failed = lambda reason: _order_failed(  # noqa: E731
         reason, result=result, opens=opens, notified=notified,

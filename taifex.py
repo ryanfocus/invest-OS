@@ -17,6 +17,8 @@ import logging
 
 import requests
 
+from broker import format_yyyymmdd
+
 logger = logging.getLogger(__name__)
 
 TAIFEX_CSV = "https://www.taifex.com.tw/cht/3/dlFutDataDown"
@@ -72,6 +74,7 @@ def fetch_ohlc(commodity: str, date_str: str, *, timeout=(10, 60)) -> dict | Non
         return float(value.strip().replace(",", ""))
 
     return {
+        "date": row[0].strip(),      # 交易日期。呼叫端要拿它驗「回的是不是那一天」
         "month": month,
         "open": num(row[3]),
         "high": num(row[4]),
@@ -93,12 +96,19 @@ def fetch_official_opens(trading_day: int) -> dict[str, float] | None:
     ⚠️ 三個商品各發一次 HTTP 請求。呼叫端必須確保這件事跑在
     **當日訊號、通知、下單全部完成之後**——它可能花上好幾十秒。
     """
-    date_str = f"{trading_day // 10000:04d}/{trading_day // 100 % 100:02d}/{trading_day % 100:02d}"
+    date_str = format_yyyymmdd(trading_day)
     opens = {}
     for commodity, key in COMMODITIES.items():
         data = fetch_ohlc(commodity, date_str)
         if data is None:
             logger.info("期交所查無 %s 在 %s 的一般時段資料", commodity, date_str)
+            return None
+        if data["date"] != date_str:
+            # ⚠️ 查詢參數說要哪一天，回傳列也要**真的是那一天**。
+            #    只信參數的話，期交所改行為（回最近一天、忽略範圍）時我們會
+            #    拿別天的資料去跟這天的觀測比對——報出一個看起來很真實的不一致，
+            #    而人會去查一個根本沒問題的日子。
+            logger.error("期交所回的是 %s 的資料，要的是 %s", data["date"], date_str)
             return None
         opens[key] = data["open"]
     return opens

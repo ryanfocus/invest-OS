@@ -33,16 +33,6 @@ from taifex import fetch_ohlc  # noqa: E402
 # ─────────────────────────────────────────────────────────────
 
 
-def taifex_open(commodity: str, date_str: str) -> dict | None:
-    """取期交所某商品某日「一般交易時段」近月合約的 OHLC。
-
-    ⚠️ **實作已搬到專案根目錄的 `taifex.py`**，讓正式程式（ticket 07 對帳）
-    與這支工具共用。CSV 的欄位位置與「一般／盤後」的篩選很容易寫錯，
-    兩份各自維護遲早會漂移，而漂移的那一份會**安靜地**對錯東西。
-    """
-    return fetch_ohlc(commodity, date_str)
-
-
 # ─────────────────────────────────────────────────────────────
 # 來源二：群益 COM（需登入）
 # ─────────────────────────────────────────────────────────────
@@ -192,7 +182,7 @@ def main() -> int:
     for capital_code, taifex_id, label in pairs:
         mine = capital.get(capital_code)
         tick = capital_first_real_tick(broker, capital_code)
-        theirs = taifex_open(taifex_id, date_str)
+        theirs = fetch_ohlc(taifex_id, date_str)
 
         n_open = mine["open"] if mine else None
         t_price = tick["price"] if tick else None
@@ -221,7 +211,7 @@ def main() -> int:
     print("-" * 34)
     for capital_code, taifex_id, label in pairs:
         mine = capital.get(capital_code)
-        theirs = taifex_open(taifex_id, date_str)
+        theirs = fetch_ohlc(taifex_id, date_str)
         if mine is None or theirs is None:
             print(f"{label:<6}資料不全（群益={mine is not None} 期交所={theirs is not None}）")
             continue

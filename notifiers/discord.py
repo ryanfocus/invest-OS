@@ -11,7 +11,7 @@ from datetime import date
 
 import requests
 
-from broker import BUY, SELL
+from broker import BUY, SELL, format_yyyymmdd
 from strategy import LONG, NO_TRADE, SHORT, SignalResult
 
 logger = logging.getLogger(__name__)
@@ -215,20 +215,88 @@ def build_reconciliation_payload(trading_day: int, mismatches) -> dict:
     三個商品同時不一致時特別要看：那正是**取到錯誤盤別**的樣子
     （單一商品差幾點比較像雜訊，三個一起偏掉不是）。
     """
-    day = f"{trading_day // 10000:04d}/{trading_day // 100 % 100:02d}/{trading_day % 100:02d}"
     lines = [
-        f"{day} OS 對帳",
+        f"{format_yyyymmdd(trading_day)} OS 對帳",
         "⚠️ **開盤價與期交所對不上**",
         "",
     ]
     for m in mismatches:
-        lines.append(f"{m.product}：我們記的 **{m.ours:.0f}**，期交所 **{m.official:.0f}**")
+        lines.append(
+            f"{m.product}：我們記的 **{_price(m.ours)}**，"
+            f"期交所 **{_price(m.official)}**（差 {_price(m.ours - m.official)}）"
+        )
     if len(mismatches) == 3:
         lines += [
             "",
             "**三個商品同時對不上**——這比較像取到錯誤的盤別（夜盤而非 AM 盤），"
             "不像單純的數字誤差。當日訊號可能是錯的。",
         ]
+    return {"content": "\n".join(lines)}
+
+
+def _price(value: float) -> str:
+    """指數點位。整數就印整數，有小數就把小數印出來。
+
+    ⚠️ 初版寫死 `:.0f`（code-review 2026-08-18 抓到）：比對的門檻是 1e-6，
+    所以小數位的差異**會**觸發告警，卻會印出兩個一模一樣的數字——
+    收到的人完全無從追查。那正好是這則訊息最需要說清楚的情況
+    （小數點跑出來多半代表期交所改了格式，不是市場的事）。
+
+    ⚠️ 也**不可以用 `:g`**：那是 6 位有效數字，而指數已經 5 位，
+    45812.25 會被印成 45812.2——訊息本身變成了一個新的誤差來源。
+    """
+    if float(value).is_integer():
+        return f"{value:.0f}"
+    # 補滿小數再把多餘的零去掉：`.` 會擋住 rstrip，所以整數部分不會被啃掉。
+    return f"{value:.4f}".rstrip("0").rstrip(".")
+
+
+def build_observation_conflict_payload(trading_day: int, detail: str) -> dict:
+    """同一個交易日出現**兩組不同的開盤價**。
+
+    重複執行本身很正常（人想再看一次），數字不同才是訊號——代表報價來源
+    在同一天給了兩個答案，而這整個系統就是建立在那三個數字上的。
+
+    ⚠️ 保留的是**第一筆**（它比較接近 08:45）。第二筆不寫，但也不能丟掉不講：
+    「同一天兩個答案」正是隔日對帳想抓的那類問題，而對帳只看得到留下的那一筆。
+    """
+    lines = [
+        f"{format_yyyymmdd(trading_day)} OS",
+        "⚠️ **同一天出現兩組不同的開盤價**",
+        "",
+        detail,
+        "",
+        "已保留**先寫入的那一筆**（較接近 08:45），這次的沒有寫進去。",
+        "請確認報價來源是否正常——這個系統的訊號完全建立在這三個數字上。",
+    ]
+    return {"content": "\n".join(lines)}
+
+
+def build_observation_damaged_payload(path: str, damaged) -> dict:
+    """觀測記錄有讀不懂的行。**這一則是告警，因為稽核歷史缺了一塊。**
+
+    壞掉的行只影響它自己那一天，其餘照常運作——正因為如此，不講的話
+    沒有任何跡象：對帳照跑、觀測照寫，只是歷史缺了幾天，
+    而缺的那幾天看起來就跟「那天沒跑」一模一樣。
+
+    ⚠️ 修好之前每天都會再發一次。那是刻意的——它是個未修復的真實缺陷，
+    而這個檔案的價值正是它的完整性。
+    """
+    lines = [
+        "OS 對帳",
+        "⚠️ **觀測記錄有讀不懂的行**",
+        "",
+        f"檔案：`{path}`",
+        "",
+    ]
+    lines += [f"・{d}" for d in damaged[:5]]
+    if len(damaged) > 5:
+        lines.append(f"・……另外還有 {len(damaged) - 5} 行")
+    lines += [
+        "",
+        "那幾天的開盤價**無法對帳**，其餘日子不受影響。",
+        "修好之前每天都會再提醒一次。",
+    ]
     return {"content": "\n".join(lines)}
 
 

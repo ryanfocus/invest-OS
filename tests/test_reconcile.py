@@ -17,7 +17,7 @@
 import pytest
 
 from conftest import RecordingNotifier
-from observations import Observation, ObservationUnreadable, append_observation
+from observations import Observation, append_observation
 from reconcile import Mismatch, compare_opens, run_reconciliation
 from strategy import LONG, NO_TRADE
 
@@ -170,6 +170,18 @@ def test_the_alert_carries_both_numbers(tmp_path):
     assert "45812" in text and "45800" in text
 
 
+def test_a_fractional_difference_is_not_rounded_away(tmp_path):
+    """**比對的門檻是 1e-6，所以小數差異會觸發告警。**
+
+    訊息若把兩邊都四捨五入成整數（初版就是 `{:.0f}`），使用者收到的是
+    「45812 與 45812 對不上」——完全無從追查。而這正好是最需要說清楚的情況：
+    指數點位跑出小數，多半代表期交所改了格式，不是市場的事。
+    """
+    _, notifier = _run(tmp_path, official={**OFFICIAL, "mtx": 45812.25})
+    text = notifier.sent[0]["content"]
+    assert "45812.25" in text, f"小數被吃掉了：{text}"
+
+
 def test_the_alert_names_the_day_being_checked_not_today(tmp_path):
     """對的是**前一交易日**。寫成今天的日期會讓人去查錯的一天。"""
     _, notifier = _run(tmp_path, official={**OFFICIAL, "tx": 1.0}, today=20260818)
@@ -197,17 +209,45 @@ def test_discord_disabled_still_completes_the_comparison(tmp_path):
 # 所以下面每一條的期望值都是「不拋例外」。
 
 
-def test_a_broken_observations_file_does_not_raise(tmp_path):
+def test_a_damaged_line_does_not_stop_the_reconciliation(tmp_path):
+    """**壞掉的行只影響它自己那一天，其他天照對。**
+
+    初版是整段停擺（讀到壞行就拋例外 → 對帳永遠不再跑，而且不發任何通知）。
+    那讓「稽核能力永久消失」跟「一切正常」長得一模一樣——
+    正是本模組要防的那種錯誤，發生在它自己身上。
+    """
     p = path(tmp_path)
     append_observation(OBS, path=p)
-    with open(p, "a", encoding="utf-8") as fh:
-        fh.write("{壞掉\n")
+    _damage(p)
     outcome = run_reconciliation(
         today=20260818, notify=RecordingNotifier(), fetch_official=lambda d: OFFICIAL,
         path=p, discord_enabled=True,
     )
-    assert outcome.checked_day is None
-    assert "讀不懂" in outcome.skipped or outcome.skipped != ""
+    assert outcome.checked_day == 20260817, "好的那筆照樣要對"
+
+
+def test_a_damaged_line_raises_an_alert(tmp_path):
+    """跳過壞行**必須配上告警**，否則就變回「安靜地少對幾天」。
+
+    這是本檔唯一一則「對帳自己壞了」也要打擾使用者的訊息——
+    因為那是個未修復的真實缺陷，不是網路抖一下。
+    """
+    p = path(tmp_path)
+    append_observation(OBS, path=p)
+    _damage(p)
+    notifier = RecordingNotifier()
+    run_reconciliation(
+        today=20260818, notify=notifier, fetch_official=lambda d: OFFICIAL,
+        path=p, discord_enabled=True,
+    )
+    assert len(notifier.sent) == 1
+    assert "讀不懂" in notifier.sent[0]["content"]
+
+
+def test_a_damaged_line_alert_does_not_fire_when_the_file_is_clean(tmp_path):
+    """對照組：檔案好好的就不該有這則。天天狼來了會讓真的那則被忽略。"""
+    _, notifier = _run(tmp_path)
+    assert notifier.sent == []
 
 
 def test_a_fetcher_that_explodes_does_not_raise(tmp_path):
@@ -248,23 +288,41 @@ def test_official_data_with_a_junk_value_does_not_raise(tmp_path):
     assert notifier.sent == []
 
 
-def test_the_module_never_raises_observation_errors_outward(tmp_path):
-    """把 `ObservationUnreadable` 洩出去就等於讓 08:50 那班掛掉。
+def test_a_notifier_that_explodes_on_the_damage_alert_does_not_raise(tmp_path):
+    """告警本身送不出去，也不可以把整班拖下水。
 
-    這條與上面那條看起來像，但守的是不同的東西：那條驗行為，
-    這條**釘住例外型別不會換一個名字繞過攔截**。
+    這一條特別容易漏：損壞告警是在函式**前段**發的，比不一致那則早得多，
+    只顧後面那則的話，前面這則就會在保護傘外面。
     """
     p = path(tmp_path)
+    append_observation(OBS, path=p)
+    _damage(p)
+
+    def boom(payload):
+        raise RuntimeError("webhook 500")
+
+    outcome = run_reconciliation(
+        today=20260818, notify=boom, fetch_official=lambda d: OFFICIAL,
+        path=p, discord_enabled=True,
+    )
+    assert outcome.checked_day == 20260817
+
+
+def test_a_half_written_record_does_not_raise(tmp_path):
+    """寫到一半斷電留下的殘缺 JSON。"""
+    p = path(tmp_path)
     with open(p, "w", encoding="utf-8") as fh:
-        fh.write('{"trading_day": 20260817}\n')
-    with pytest.raises(ObservationUnreadable):
-        from observations import read_observation_before
-        read_observation_before(20260818, path=p)
-    # 但透過 run_reconciliation 就不會炸
+        fh.write('{"trading_day": 20260817}' + chr(10))
     run_reconciliation(
         today=20260818, notify=RecordingNotifier(), fetch_official=lambda d: OFFICIAL,
         path=p, discord_enabled=True,
     )
+
+
+def _damage(p: str) -> None:
+    """在檔尾追加一行讀不懂的內容——寫到一半斷電就長這樣。"""
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write("{截斷的" + chr(10))
 
 
 def _at(day: int) -> Observation:
