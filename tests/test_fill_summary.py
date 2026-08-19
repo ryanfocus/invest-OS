@@ -169,3 +169,57 @@ def test_no_rows_at_all_means_nothing_is_known():
     assert summary.matched_rows == 0
     assert summary.filled_lots == 0
     assert summary.rejected is False
+
+
+# --- 序號拿不到時：**一列都不准算** ---
+#
+# 2026-08-19 實測抓到的真實漏洞。原本寫的是：
+#
+#     if seq and seq not in row:      # ← seq 為空時，整條過濾被跳過
+#         continue
+#
+# 於是序號拿不到時，視窗內**每一列**期貨回報都被算成自己的成交。
+# 而序號來自 `SendFutureOrderCLR` 的回傳訊息，那是整個系統裡
+# **唯一從來沒有真正執行過的 API**——它回什麼我們並不知道。
+#
+# 同一天使用者換倉的價差單就出現在同一條串流上（見
+# fixtures/onnewdata-spread-2026-08-19.txt），證明這不是理論風險。
+# 後果：OS 記下一個它沒有的部位 → 13:40 送出平倉單 → 開出反向新倉。
+
+
+def _fixture_rows():
+    import os
+    path = os.path.join(os.path.dirname(__file__), "fixtures",
+                        "onnewdata-spread-2026-08-19.txt")
+    with open(path, encoding="utf-8") as fh:
+        return [ln.strip() for ln in fh
+                if ln.strip() and not ln.startswith("#")]
+
+
+def test_an_empty_sequence_matches_nothing():
+    """**認不出是哪一筆，就一列都不算。** 這是本檔開頭那條規則的極端情況。"""
+    assert summarize_fills([_row("D", qty="2")], "").matched_rows == 0
+
+
+def test_an_empty_sequence_does_not_claim_someone_elses_fill():
+    """用當天真實的別人的單來驗，不是自己組的假資料。
+
+    這兩列是使用者 11:38 換倉的價差單，出現在 OS 自己的回報串流上。
+    序號為空時原本會回 `filled_lots=1`——OS 因此以為自己有 1 口微台。
+    """
+    assert summarize_fills(_fixture_rows(), "").filled_lots == 0
+
+
+def test_someone_elses_order_is_ignored_when_our_sequence_is_known():
+    """對照組：序號正常時本來就過濾得掉。**漏洞只在序號拿不到時出現。**"""
+    summary = summarize_fills(_fixture_rows(), "OUR000000001")
+    assert summary.matched_rows == 0 and summary.filled_lots == 0
+
+
+def test_an_empty_sequence_is_not_settled_so_the_caller_must_treat_it_as_unknown():
+    """一列都不算 → 永遠不會「結束」→ 上層走 FillUnknown。
+
+    那是正確的結局：單確實送出去了（已經過了 SendFutureOrderCLR 那一行），
+    只是我們無法辨識回報。**絕不可以當成「沒有部位」。**
+    """
+    assert summarize_fills(_fixture_rows(), "").is_settled(1) is False

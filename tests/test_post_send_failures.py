@@ -42,12 +42,12 @@ class _StubReplyEvents:
     rows: list = []
 
 
-def _broker(*, order_code=0, on_wait=None):
+def _broker(*, order_code=0, on_wait=None, message="SEQ0000000001"):
     """組一個內部協作物件都被換掉、不碰 COM 的 CapitalBroker。"""
     broker = CapitalBroker("id", "pw", environment="test", account="F9990001234567")
     broker._center = object()          # 只用來過「尚未登入」那道檢查
     broker._order_ready = True
-    broker._order = _StubOrder(code=order_code)
+    broker._order = _StubOrder(code=order_code, message=message)
     broker._sk = _StubSk()
     broker._reply_events = _StubReplyEvents()
     broker._message = lambda code: f"代碼 {code}"
@@ -121,3 +121,52 @@ def test_an_order_failure_raised_after_the_send_is_not_masked():
     broker._reply_events.rows = []
     with pytest.raises(OrderFailed):
         broker.place_order(REQUEST)
+
+
+# --- 送出成功卻拿不到委託序號 ---
+#
+# 2026-08-19 實測發現的漏洞。序號來自 `SendFutureOrderCLR` 的回傳訊息，
+# 而那是整個系統裡**唯一從來沒有真正執行過的 API**——它成功時回不回序號，
+# 我們其實不知道。
+#
+# 序號是 OS 認出自己那筆回報的唯一依據：回報事件是共用的，使用者的手動交易
+# 走同一條線（當天換倉的價差單就出現在這條串流上，見
+# fixtures/onnewdata-spread-2026-08-19.txt）。
+
+
+@pytest.mark.parametrize("message", ["", "   ", None])
+def test_a_send_without_a_sequence_number_is_fill_unknown(message):
+    """**單已經在市場上了**（code == 0），只是我們認不出它的回報。
+
+    `OrderFailed` 會是災難性的誤述：它的意思是「確定沒有部位」，
+    上層因此不寫狀態檔，13:40 那班不會去平——部位直接進夜盤。
+    """
+    waited = []
+    broker = _broker(message=message, on_wait=lambda *a, **k: waited.append(1))
+    with pytest.raises(FillUnknown):
+        broker.place_order(REQUEST)
+    # ⚠️ 一起斷言「沒有進入等待」。少了這一條，`message=None` 會靜靜地
+    #    走到逾時才拋 FillUnknown——測試照樣綠，但那是**因為別的理由**。
+    #    （`str(None)` 是 "None"，一個看起來很正常的非空字串。）
+    assert waited == []
+
+
+def test_a_send_without_a_sequence_number_says_what_to_do():
+    """訊息要講「去確認帳戶」，不是講一個看起來像市場沒成交的逾時。"""
+    broker = _broker(message="")
+    with pytest.raises(FillUnknown, match="人工確認"):
+        broker.place_order(REQUEST)
+
+
+def test_a_send_without_a_sequence_number_never_waits_for_fills():
+    """沒有序號就等於沒有過濾條件，等下去只會等到別人的回報。
+
+    ⚠️ 這條也擋住一種「修對了一半」：只在彙整那層擋，`place_order` 仍會
+    白等 10 秒，然後報「仍未結束」——那句話聽起來像市場沒成交，
+    而真正的問題是我們認不出來。兩者的處理完全不同。
+    """
+    waited = []
+    broker = _broker(message="", on_wait=lambda *a, **k: waited.append(1))
+    with pytest.raises(FillUnknown):
+        broker.place_order(REQUEST)
+    assert waited == [], "不該進入等待迴圈"

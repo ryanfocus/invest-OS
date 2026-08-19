@@ -308,7 +308,25 @@ def summarize_fills(rows, seq: str) -> FillSummary:
     比對委託序號用**整列子字串搜尋**而不是特定欄位。這個選擇原本是因為欄位位置
     還沒驗過，而 2026-08-17 的真實資料證明它另有價值：**成交回報的 `[0] KeyNo`
     是空的**，序號只出現在最後一欄。固定看某一欄的話，成交列就配不到委託列。
+
+    ⚠️ **`seq` 為空字串時一列都不算**，因為空字串是任何字串的子字串。
+
+    原本寫的是 `if seq and seq not in row: continue`——那個 `seq and` 讓
+    序號拿不到時整條過濾被跳過，視窗內**每一列**期貨回報都被算成自己的成交。
+    而序號來自 `SendFutureOrderCLR` 的回傳訊息，那是整個系統裡
+    **唯一從來沒真正執行過的 API**，它成功時回不回序號我們並不知道。
+
+    2026-08-19 實測證實這不是理論風險：使用者換倉的價差單就出現在
+    OS 自己的回報串流上（見 fixtures/onnewdata-spread-2026-08-19.txt）。
+    後果是 OS 記下一個它沒有的部位 → 13:40 送出平倉單 → 開出反向新倉。
+
+    回空的彙整而不是拋例外：這是純函式，讓上層的 `is_settled()` 判定為
+    「還沒結束」，自然走到 `FillUnknown`。那才是正確的結局——
+    單確實送出去了，只是我們無法辨識回報，**絕不等於沒有部位**。
     """
+    if not seq:
+        return FillSummary(filled_lots=0, rejected=False, matched_rows=0)
+
     filled = 0
     matched = 0
     reject_reason = ""
@@ -318,7 +336,7 @@ def summarize_fills(rows, seq: str) -> FillSummary:
         parsed = parse_reply_row(row)
         if parsed is None:
             continue
-        if seq and seq not in row:
+        if seq not in row:
             continue
         matched += 1
         if parsed.failed and not reject_reason:
@@ -642,7 +660,23 @@ class CapitalBroker:
         #    FillUnknown 而不是 OrderFailed——包括 COM 壞掉、訊息幫浦拋例外
         #    這種與委託本身無關的意外。說成「確定沒有部位」的話，
         #    上層就不會留下記錄，13:40 那班會以為今天沒進場。
-        seq = str(message)
+        # ⚠️ `str(None)` 是 `"None"`——一個看起來很正常的非空字串。
+        #    少了這個 `is None` 判斷，回傳 None 時會拿字面上的 "None" 當序號，
+        #    它配不到任何一列，於是白等 10 秒才以「仍未結束」收場——
+        #    那句話聽起來像市場沒成交，而真正的問題是我們根本沒有序號。
+        seq = "" if message is None else str(message).strip()
+        if not seq:
+            # 送出成功（code == 0）卻拿不到序號。**單已經在市場上了**，
+            # 但我們失去了辨識自己回報的唯一依據——回報事件是共用的，
+            # 使用者的手動交易走同一條線（2026-08-19 實測：換倉的價差單
+            # 就出現在這條串流上）。沒有序號就只能承認不知道，
+            # 不能等 10 秒逾時再說——那 10 秒的訊息會是「仍未結束」，
+            # 聽起來像市場沒成交，而真正的問題是我們認不出來。
+            raise FillUnknown(
+                "委託已送出但未取得委託序號，無法辨識成交回報。"
+                "請人工確認帳戶實際部位。",
+                order_seq="",
+            )
         logger.info("委託已送出，序號 %s", seq)
         try:
             return self._await_fill(seq=seq, since=before, requested_lots=request.lots)
