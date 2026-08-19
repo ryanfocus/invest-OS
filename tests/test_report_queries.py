@@ -221,19 +221,36 @@ def test_a_spread_row_is_refused():
 
     OS 自己不下價差單，所以這只會在「委託書號認錯」時發生。
     看到價差列就代表前提已經破了，回 None 比硬算安全。
+
+    ⚠️ 口數與 `requested_lots` 刻意都設 2，讓「超額口數」那道守衛**不會**觸發。
+    初版兩條都用 1 口，於是真正擋下它的是超額那道——價差守衛自己壞掉也測不出來。
     """
-    text = _fill_row(product="TMFH6/I6", qty="1")
-    assert parse_filled_lots(text, BOOK, DAY, requested_lots=1) is None
+    text = _fill_row(product="TMFH6/I6", qty="2")
+    assert parse_filled_lots(text, BOOK, DAY, requested_lots=2) is None
 
 
 def test_the_real_spread_fills_are_refused():
-    """用當天真實的價差成交驗上一條。
+    """用當天真實的價差成交驗上一條。**這是本檔最重要的一條。**
 
-    這兩列的委託書號確實是 x0582——也就是說**日期與書號都對得上**，
-    只有「這是價差」擋得住它。加總會得到 2 口，而使用者只換了 1 口。
+    這兩列的委託書號確實是 x0582、日期也對得上，只有「這是價差」擋得住它。
+
+    ⚠️ `requested_lots=2` 是刻意的。用 1 的話，兩列加總 2 口會先被
+    「超額口數」那道擋掉，價差守衛壞掉也照樣綠——2026-08-19 的 code-review
+    正是這樣抓到初版的守衛看錯欄位：真實價差列的 `[12]` 放的是**單腳**代碼
+    （`TMFH6` / `TMFI6`），斜線只出現在最後一欄。
     """
     _, fulfill = _fixture()
-    assert parse_filled_lots(fulfill, BOOK, DAY, requested_lots=1) is None
+    assert parse_filled_lots(fulfill, BOOK, DAY, requested_lots=2) is None
+
+
+def test_the_spread_marker_is_looked_for_anywhere_in_the_row():
+    """真實資料裡斜線出現在**最後一欄**，不在商品那一欄。
+
+    只看 `[12]` 的話，這一列會被當成單腳而把口數加進去。
+    """
+    f = _fill_row(qty="2").split(",")
+    f[-1] = "TMFH6/I6"          # 斜線只在最後一欄，就像真實資料
+    assert parse_filled_lots(",".join(f), BOOK, DAY, requested_lots=2) is None
 
 
 def test_a_non_numeric_quantity_is_refused():
@@ -299,3 +316,73 @@ def test_the_last_connection_error_is_kept_for_the_message():
     events = _ReplyEvents()
     events.OnConnect("U123", 3001)
     assert "3001" in events.connect_error
+
+
+# ─────────────────────────────────────────────────────────
+# M003（查無資料）與 M999（查詢錯誤）必須分得開
+# ─────────────────────────────────────────────────────────
+#
+# 兩者都回 []（絕不可當成「確定沒成交」），但意思相反：
+#
+#   M003  正常——單還沒進到紀錄裡、或那天沒交易
+#   M999  故障——後備管道自己壞了，而那正是這張票要消滅的處境
+#
+# ⚠️ 原本這幾條測試是**空斷言**：把整段前綴判斷刪掉，全庫測試依然全綠。
+#    因為 "M003" 逗號切完只有 1 欄，欄位數檢查（len(fields) <= 索引）
+#    就先把它 continue 掉了。所以要斷言的是**兩者被區分開**這件事本身。
+
+
+def test_no_data_and_a_query_error_are_logged_differently(caplog):
+    """行為相同（都回 []），所以唯一分得出兩者的就是這條 log 線索。
+
+    不釘住它，「查詢元件壞掉」會長得跟「單還沒成交」一模一樣，
+    這條後備管道靜靜地永遠回 None，而每天照樣要人介入。
+    """
+    import logging
+    from broker.capital import _query_rows
+
+    with caplog.at_level(logging.INFO, logger="broker.capital"):
+        _query_rows("M003")
+    levels_for_no_data = {r.levelno for r in caplog.records}
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="broker.capital"):
+        _query_rows("M999: 查詢錯誤")
+    levels_for_error = {r.levelno for r in caplog.records}
+
+    assert levels_for_no_data == {logging.INFO}, "查無資料是正常的，不該是 ERROR"
+    assert levels_for_error == {logging.ERROR}, "查詢故障要看得見，不能只是 INFO"
+
+
+def test_a_query_error_row_is_never_parsed_as_data():
+    """萬一 M999 的訊息剛好有夠多逗號，也不可以被當成資料列。"""
+    from broker.capital import _query_rows
+    assert _query_rows("M999," + ",".join(["x"] * 40)) == []
+
+
+def test_a_no_data_marker_is_never_parsed_as_data():
+    from broker.capital import _query_rows
+    assert _query_rows("M003," + ",".join(["x"] * 40)) == []
+
+
+# ─────────────────────────────────────────────────────────
+# 成交查詢的期貨市場別檢查
+# ─────────────────────────────────────────────────────────
+#
+# 委託查詢那一側本來就有測，成交查詢這一側漏了——而真正把數字加起來
+# 寫進狀態檔的是這一半。證券（TS）與海期（OF）的列就在同一份回傳裡，
+# 而它們的欄位語意與期貨完全不同。
+
+
+def test_a_non_futures_fill_row_is_not_counted():
+    row = _fill_row(qty="1").replace("TF,FUT", "TS,STK", 1)
+    assert parse_filled_lots(row, BOOK, DAY, requested_lots=1) is None
+
+
+def test_a_non_futures_row_does_not_contaminate_a_real_one():
+    """混在一起時只算期貨那一列。少了市場別檢查，兩列都會被加進去。"""
+    text = "\r\n".join([
+        _fill_row(qty="1").replace("TF,FUT", "TS,STK", 1),
+        _fill_row(qty="1"),
+    ])
+    assert parse_filled_lots(text, BOOK, DAY, requested_lots=1) == 1

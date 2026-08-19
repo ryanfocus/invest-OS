@@ -24,7 +24,7 @@ from broker import BUY, FillUnknown, MTX_CODE, OpenPrices, SELL
 from broker.fake import FakeBroker
 from conftest import CONTRACTS, RecordingNotifier, make_config, observations_path, state_path
 from main import run_entry, run_exit
-from state import CONFIRMED, UNCERTAIN, PositionRecord, read_position, write_position
+from state import CONFIRMED, UNCERTAIN, PositionRecord, read_position, write_position, UNCERTAIN_ENTRY
 
 D = date(2026, 8, 18)
 OPENS = OpenPrices(tx=42331, mtx=42298, tmf=42265)
@@ -52,7 +52,7 @@ def _uncertain_record(**over):
         trading_day=20260818, product=MTX_CODE, order_code="MTX08",
         contract_month="202608", last_trading_day=20260916,
         side=BUY, lots=None, requested_lots=2,
-        status=UNCERTAIN, order_seq="SEQ0000000001",
+        status=UNCERTAIN, uncertain_stage=UNCERTAIN_ENTRY, order_seq="SEQ0000000001",
     )
     base.update(over)
     return PositionRecord(**base)
@@ -213,16 +213,101 @@ def test_a_confirmed_record_never_queries():
     """狀態已確認就沒有東西要查。多查一次要多花 5 秒（文件規定的間隔），
     而 13:40 的每一秒都在逼近收盤。"""
     _, _, broker = _exit(query_result=None, record=_uncertain_record(
-        lots=2, status=CONFIRMED))
+        lots=2, status=CONFIRMED, uncertain_stage=""))
     assert broker.query_calls == []
     assert len(broker.orders) == 1
 
 
-def test_the_exit_query_happens_before_the_switch_check():
-    """開關關著時**仍然要查**——那時帳上可能有早上開的部位，
+def test_the_switch_being_off_stops_the_query_touching_the_broker():
+    """**開關關著就不查。**
 
-    而使用者需要知道「究竟有沒有部位、幾口」才能自己處理。
-    查得到就把答案講清楚，比丟一句「不確定」有用得多。
+    查詢會登入並初始化下單元件（`_ensure_order_ready` → SKOrderLib 初始化、
+    `SKReplyLib_ConnectByID`、`GetUserAccount`），而 SPEC 使用者故事 38 要求
+    「只發 Discord、不下單」的模式下**完全不呼叫任何下單 API**——
+    使用者關掉開關通常正是想切斷程式與券商的連線。
+
+    ⚠️ 這條測試的初版寫反了（斷言「開關關著仍然要查」），而且它**根本沒把
+    開關關掉**——`_exit()` 把 `auto_order_enabled=True` 寫死，`**kw` 是轉給
+    FakeBroker 的。所以那條斷言恆真，什麼都沒守到。
     """
-    _, _, broker = _exit(query_result=2, record=_uncertain_record())
-    assert broker.query_calls != []
+    write_position(_uncertain_record(), path=state_path())
+    broker = FakeBroker(query_result=2)
+    notifier = RecordingNotifier()
+    run_exit(
+        make_config(auto_order_enabled=False),
+        today=D, broker=broker, notify=notifier, sleep=lambda _s: None,
+        state_path=state_path(),
+    )
+    assert broker.query_calls == [], "開關關著卻仍然查詢＝碰了下單元件"
+    assert broker.login_calls == 0, "開關關著卻仍然登入"
+    assert broker.orders == []
+    assert "不確定持有幾口" in notifier.text, "仍然要講清楚帳上可能有部位"
+
+
+# ─────────────────────────────────────────────────────────
+# 🔴 出場單的不確定：**一張單都不准再送**
+# ─────────────────────────────────────────────────────────
+#
+# 2026-08-19 code-review 抓到的迴歸，實測重現過：
+#
+#   13:40 送出場單 → FillUnknown → 記錄變成 UNCERTAIN，
+#   而 `order_seq` 被換成**出場單**的序號
+#   → 重跑時拿它去查，查到出場單成交的 N 口
+#   → 程式當成「早上成交 N 口」→ 再送一筆等量反向委託
+#   → 帳上早就平掉了，第二筆是裸露的反向新倉，沒人管地進夜盤
+#   → 而狀態檔還說「已了結」
+#
+# ticket 09 之前這條路徑是直接拒絕送單並發 Discord，是安全的。
+
+
+def _exit_uncertain_record(**over):
+    from state import UNCERTAIN_EXIT
+    base = dict(lots=None, status=UNCERTAIN, uncertain_stage=UNCERTAIN_EXIT,
+                order_seq="EXIT_SEQ_999")
+    base.update(over)
+    return _uncertain_record(**base)
+
+
+def test_an_uncertain_exit_never_sends_another_order():
+    """**本組最重要的一條。** 那筆可能已經成交了。"""
+    _, _, broker = _exit(query_result=2, record=_exit_uncertain_record())
+    assert broker.orders == []
+
+
+def test_an_uncertain_exit_does_not_even_query():
+    """查詢在這裡幫不上忙，而且會誤導——`order_seq` 是**出場單**的序號，
+    查到的成交是出場單自己的，看起來卻像「早上成交了 N 口」。"""
+    _, _, broker = _exit(query_result=2, record=_exit_uncertain_record())
+    assert broker.query_calls == []
+
+
+def test_an_uncertain_exit_asks_a_human_to_check_the_account():
+    """訊息要講「先確認帳戶再決定要不要補單」，不是「請照著送這張單」——
+    盲送的後果就是反向新倉。"""
+    _, notifier, _ = _exit(query_result=2, record=_exit_uncertain_record())
+    assert "確認帳戶實際部位" in notifier.text
+
+
+def test_an_uncertain_exit_exits_with_an_error():
+    outcome, _, _ = _exit(query_result=2, record=_exit_uncertain_record())
+    assert outcome.exit_code == 1
+
+
+def test_a_full_exit_failure_cycle_does_not_double_up():
+    """端到端：13:40 出場回報沒到 → 重跑 → **第二次一張單都不送**。
+
+    走的是真正的資料流（第一輪自己寫的記錄，第二輪自己讀回來），
+    不是手工組的記錄——手工組的話就測不到 `uncertain_stage` 有沒有真的被寫進去。
+    """
+    write_position(_uncertain_record(lots=2, status=CONFIRMED, uncertain_stage=""),
+                   path=state_path())
+    first = FakeBroker(order_error=FillUnknown("逾時", order_seq="EXIT_SEQ_999"))
+    run_exit(make_config(auto_order_enabled=True), today=D, broker=first,
+             notify=RecordingNotifier(), sleep=lambda _s: None, state_path=state_path())
+    assert len(first.orders) == 1, "第一輪應該有送單"
+
+    second = FakeBroker(query_result=2)
+    run_exit(make_config(auto_order_enabled=True), today=D, broker=second,
+             notify=RecordingNotifier(), sleep=lambda _s: None, state_path=state_path())
+    assert second.orders == [], "重跑不可以再送一次——帳上可能早就平掉了"
+    assert read_position(path=state_path()).exited is False,         "沒有證據就不可以標成已了結"

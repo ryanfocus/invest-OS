@@ -20,7 +20,7 @@ from broker import BUY, EXIT, MTX_CODE, SELL
 from broker.fake import FakeBroker
 from conftest import RecordingNotifier, make_config, observations_path, state_path
 from main import run_exit
-from state import UNCERTAIN, PositionRecord, read_position, write_position
+from state import UNCERTAIN, PositionRecord, read_position, write_position, UNCERTAIN_ENTRY
 
 D = date(2026, 8, 10)            # 一般交易日（週一）
 SETTLEMENT = date(2026, 8, 19)   # 狀態檔記的最後交易日
@@ -155,12 +155,12 @@ def test_the_switch_being_off_places_no_exit_order():
 
 def test_an_uncertain_record_places_no_order():
     """**不知道持有幾口就下單，可能開出反向新倉，比什麼都不做更糟。**"""
-    _, _, broker = _run(_record(lots=None, status=UNCERTAIN))
+    _, _, broker = _run(_record(lots=None, status=UNCERTAIN, uncertain_stage=UNCERTAIN_ENTRY))
     assert broker.orders == []
 
 
 def test_an_uncertain_record_asks_for_human_help():
-    outcome, notifier, _ = _run(_record(lots=None, status=UNCERTAIN))
+    outcome, notifier, _ = _run(_record(lots=None, status=UNCERTAIN, uncertain_stage=UNCERTAIN_ENTRY))
     assert notifier.sent != [], "不確定時絕不可以靜默結束"
     assert "MTX08" in notifier.text
     assert outcome.exit_code != 0
@@ -293,7 +293,7 @@ def test_settlement_day_with_an_uncertain_record_still_flags_the_uncertainty():
     只發一則平靜的「已結算」而不提這個，使用者就永遠不會去對這筆帳。
     """
     _, notifier, broker = _run(
-        _record(trading_day=20260819, lots=None, status=UNCERTAIN),
+        _record(trading_day=20260819, lots=None, status=UNCERTAIN, uncertain_stage=UNCERTAIN_ENTRY),
         today=SETTLEMENT,
     )
     assert broker.orders == [], "不確定持有幾口，更不能送單"

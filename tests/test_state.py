@@ -20,6 +20,8 @@ import pytest
 from broker import BUY, MTX_CODE, SELL
 from state import (
     BY_EXIT,
+    UNCERTAIN_ENTRY,
+    clear_position,
     BY_SETTLEMENT,
     CONFIRMED,
     UNCERTAIN,
@@ -27,6 +29,7 @@ from state import (
     StateCorrupted,
     read_position,
     write_position,
+    UNCERTAIN_ENTRY,
 )
 
 RECORD = PositionRecord(
@@ -98,7 +101,7 @@ def test_an_uncertain_record_can_be_written_and_read_back(tmp_path):
     path = tmp_path / "position.json"
     record = PositionRecord(
         trading_day=20260810, product=MTX_CODE, order_code="MTX08",
-        contract_month="202608", requested_lots=2, last_trading_day=20260819, side=BUY, lots=None, status=UNCERTAIN,
+        contract_month="202608", requested_lots=2, last_trading_day=20260819, side=BUY, lots=None, status=UNCERTAIN, uncertain_stage=UNCERTAIN_ENTRY,
         order_seq="SEQ0000000001",
     )
     write_position(record, path=str(path))
@@ -114,7 +117,7 @@ def test_uncertain_lots_are_none_not_zero(tmp_path):
     with pytest.raises(ValueError, match="不確定"):
         PositionRecord(
             trading_day=20260810, product=MTX_CODE, order_code="MTX08",
-            contract_month="202608", requested_lots=2, last_trading_day=20260819, side=BUY, lots=0, status=UNCERTAIN,
+            contract_month="202608", requested_lots=2, last_trading_day=20260819, side=BUY, lots=0, status=UNCERTAIN, uncertain_stage=UNCERTAIN_ENTRY,
         )
 
 
@@ -143,7 +146,7 @@ def test_uncertain_records_are_flagged_for_the_exit_flow():
     """
     uncertain = PositionRecord(
         trading_day=20260810, product=MTX_CODE, order_code="MTX08",
-        contract_month="202608", requested_lots=2, last_trading_day=20260819, side=BUY, lots=None, status=UNCERTAIN,
+        contract_month="202608", requested_lots=2, last_trading_day=20260819, side=BUY, lots=None, status=UNCERTAIN, uncertain_stage=UNCERTAIN_ENTRY,
     )
     assert uncertain.is_uncertain is True
     assert RECORD.is_uncertain is False
@@ -257,3 +260,85 @@ def test_the_file_is_readable_json_for_a_human(tmp_path):
     write_position(RECORD, path=str(path))
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["lots"] == 2 and data["side"] == BUY
+
+
+# --- 清除狀態檔：「確定沒有部位」在這套設計裡就是「沒有記錄」 ---
+#
+# ⚠️ 這幾條是 2026-08-19 code-review 補的。原本 `clear_position` 一條測試都沒有：
+#    把整個函式改成 no-op，406 條測試依然全綠。而它負責的正是本次新增的那個
+#    狀態轉換（UNCERTAIN → 檔案消失），也正是 SPEC〈Testing Decisions〉
+#    明列必須斷言的三種外部效果之一「寫入的狀態檔」。
+
+
+def test_clearing_removes_the_record(tmp_path):
+    path = tmp_path / "position.json"
+    write_position(RECORD, path=str(path))
+    clear_position(path=str(path))
+    assert read_position(path=str(path)) is None
+
+
+def test_clearing_an_absent_file_is_not_an_error(tmp_path):
+    """查詢確認 0 口時會呼叫它，而那時檔案可能根本沒建立過。"""
+    clear_position(path=str(tmp_path / "never-existed.json"))
+
+
+def test_clearing_leaves_other_files_alone(tmp_path):
+    """觀測記錄與狀態檔住在同一個目錄。清錯的話會把稽核歷史一起刪掉。"""
+    path = tmp_path / "position.json"
+    neighbour = tmp_path / "observations.jsonl"
+    neighbour.write_text("keep me", encoding="utf-8")
+    write_position(RECORD, path=str(path))
+    clear_position(path=str(path))
+    assert neighbour.read_text(encoding="utf-8") == "keep me"
+
+
+def test_an_uncertain_record_must_say_which_order_is_uncertain():
+    """**進場不確定與出場不確定的正確處理完全相反**：
+
+      進場不確定 → 下午查得到就照常平倉
+      出場不確定 → **絕對不可以再送一次**（那筆可能已經成交了）
+
+    少了這個欄位，兩者長得一模一樣，而出場那筆的 `order_seq` 記的是
+    出場單的序號——重跑時拿去查會查到出場單自己的成交，看起來像
+    「早上成交了 N 口」，於是再送一筆反向委託。
+    """
+    with pytest.raises(ValueError, match="哪一筆委託"):
+        PositionRecord(
+            trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+            contract_month="202608", requested_lots=2, last_trading_day=20260819,
+            side=BUY, lots=None, status=UNCERTAIN,
+        )
+
+
+def test_a_confirmed_record_must_not_claim_an_uncertain_stage():
+    with pytest.raises(ValueError, match="uncertain_stage"):
+        PositionRecord(
+            trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+            contract_month="202608", requested_lots=2, last_trading_day=20260819,
+            side=BUY, lots=2, status=CONFIRMED, uncertain_stage=UNCERTAIN_ENTRY,
+        )
+
+
+def test_the_two_uncertain_stages_are_distinguishable():
+    from state import UNCERTAIN_EXIT
+    base = dict(
+        trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+        contract_month="202608", requested_lots=2, last_trading_day=20260819,
+        side=BUY, lots=None, status=UNCERTAIN,
+    )
+    entry = PositionRecord(**base, uncertain_stage=UNCERTAIN_ENTRY)
+    exit_ = PositionRecord(**base, uncertain_stage=UNCERTAIN_EXIT)
+    assert (entry.uncertain_entry, entry.uncertain_exit) == (True, False)
+    assert (exit_.uncertain_entry, exit_.uncertain_exit) == (False, True)
+    assert entry.is_uncertain and exit_.is_uncertain
+
+
+def test_the_uncertain_stage_survives_a_write_and_read(tmp_path):
+    """`read_position` 會擋掉不認得的欄位，所以新欄位要有一條真的落地再讀回來。"""
+    from dataclasses import replace
+    from state import UNCERTAIN_EXIT
+    path = tmp_path / "position.json"
+    record = replace(RECORD, lots=None, status=UNCERTAIN,
+                     uncertain_stage=UNCERTAIN_EXIT)
+    write_position(record, path=str(path))
+    assert read_position(path=str(path)).uncertain_exit is True

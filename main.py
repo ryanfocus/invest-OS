@@ -50,6 +50,8 @@ from state import (
     CONFIRMED,
     STATE_PATH,
     UNCERTAIN,
+    UNCERTAIN_ENTRY,
+    UNCERTAIN_EXIT,
     PositionRecord,
     StateCorrupted,
     clear_position,
@@ -168,8 +170,28 @@ def _place_entry_order(
     except FillUnknown as exc:
         # **委託送出去了，但不知道成交幾口。**
         #
-        # 舉手投降之前先問一次（ticket 09）。推播（OnNewData）與查詢
-        # （GetOrderReport → GetFulfillReport）走不同元件、不同連線、
+        # ⚠️ **先寫檔，再查詢。順序不可以反。**
+        #    查詢是補救措施，而寫檔是「我送了一張單」這個既成事實的唯一記錄。
+        #    先查的話，查詢那一步若拋出任何東西（連線、COM、假 broker 的斷言），
+        #    例外會帶著整個函式離開而**什麼都沒寫**——13:40 那班會以為今天沒進場，
+        #    帳上的部位直接進夜盤，而早上的 Discord 還說「委託沒有送出去」。
+        #    （2026-08-19 code-review 抓到：ticket 09 初版把順序寫反了。）
+        record = PositionRecord(
+                trading_day=to_yyyymmdd(today),
+                product=request.product,
+                order_code=request.order_code,
+                contract_month=request.contract_month,
+                side=request.side,
+                lots=None,                       # 成交幾口不知道，不是 0
+                requested_lots=request.lots,     # 但送出去幾口是知道的——曝險上界
+                last_trading_day=contract.last_trading_day,
+                status=UNCERTAIN,
+                uncertain_stage=UNCERTAIN_ENTRY,  # 不確定的是**進場**那一筆
+                order_seq=exc.order_seq,         # 讓使用者能在券商 APP 直接查到那一筆
+        )
+        write_position(record, path=state_path)
+
+        # 記錄寫好了，現在才問（ticket 09）。推播與查詢走不同元件、不同連線、
         # 不同通訊方式，失效原因幾乎不重疊——推播沒來最可能的解釋是
         # 「推播管線壞了」，而那正是查詢救得起來的情況。
         lots = broker.query_filled_lots(
@@ -181,42 +203,18 @@ def _place_entry_order(
             logger.info("成交查詢補上了答案：%d 口", lots)
             if lots == 0:
                 # **確定沒成交**——與「查不到」是完全不同的答案。
-                # 不寫記錄，因為下午沒有東西要平；寫了反而會去平一個
+                # 清掉剛才那筆記錄：下午沒有東西要平，留著它會去平一個
                 # 不存在的部位，那筆反向委託會變成新倉。
-                logger.warning("成交查詢確認未成交（0 口），不寫入狀態檔")
+                logger.warning("成交查詢確認未成交（0 口），清除狀態檔")
+                clear_position(path=state_path)
                 return OrderResult(filled_lots=0, order_seq=exc.order_seq)
             write_position(
-                PositionRecord(
-                    trading_day=to_yyyymmdd(today),
-                    product=request.product,
-                    order_code=request.order_code,
-                    contract_month=request.contract_month,
-                    side=request.side,
-                    lots=lots,
-                    requested_lots=request.lots,
-                    last_trading_day=contract.last_trading_day,
-                    order_seq=exc.order_seq,
-                ),
+                replace(record, lots=lots, status=CONFIRMED, uncertain_stage=""),
                 path=state_path,
             )
             return OrderResult(filled_lots=lots, order_seq=exc.order_seq)
 
-        # 查詢也答不出來 → 維持原本的行為。先把「我送了單」這件事寫下來，
-        # 再讓例外往上走。順序不能反——寫檔在後的話，中途出事就什麼記錄都沒有，
-        # 下午那班會以為今天沒進場，帳上的部位就直接進夜盤。
-        record = PositionRecord(
-                trading_day=to_yyyymmdd(today),
-                product=request.product,
-                order_code=request.order_code,
-                contract_month=request.contract_month,
-                side=request.side,
-                lots=None,                       # 成交幾口不知道，不是 0
-                requested_lots=request.lots,     # 但送出去幾口是知道的——曝險上界
-                last_trading_day=contract.last_trading_day,
-                status=UNCERTAIN,
-                order_seq=exc.order_seq,         # 讓使用者能在券商 APP 直接查到那一筆
-        )
-        write_position(record, path=state_path)
+        # 查詢也答不出來 → 維持「不確定」。
         # 把記錄掛在例外上帶給呼叫端。在 except 區段裡重新讀檔的話，
         # 那次讀本身可能拋 StateCorrupted，於是例外逃出 run_entry 而一則通知都不發。
         exc.record = record
@@ -672,13 +670,36 @@ def run_exit(
         notified = _send(build_settlement_payload(record, today))
         return ExitOutcome(exited=True, remaining=0, notified=notified, exit_code=0)
 
+    if record.uncertain_exit:
+        # ⚠️ **不確定的是出場那一筆——一張單都不准再送。**
+        #
+        # 那筆可能已經成交了。再送一次等量反向委託，就是在已經平掉的帳上
+        # 繼續賣（或買），開出一個沒人管的反向新倉。
+        #
+        # 而且**查詢在這裡幫不上忙**：`order_seq` 記的是出場單的序號，
+        # 拿去查只會查到出場單自己的成交——看起來像「早上成交了 N 口」，
+        # 那正是危險的地方（2026-08-19 code-review 實測重現）。
+        #
+        # 這是 `broker/__init__.py` 的 `FillUnknown` docstring 寫死的規則：
+        # 可能已經成交的單，絕不可以自動再送一次。
+        reason = "出場委託的成交狀況不確定，未重複送單"
+        logger.error("%s", reason)
+        notified = _send(build_exit_unknown_payload(record, reason, today))
+        return ExitOutcome(exited=False, remaining=None, notified=notified,
+                           exit_code=1, failure=reason)
+
     if record.is_uncertain:
-        # 舉手投降之前先問一次（ticket 09）。早上推播沒到不代表現在也查不到——
+        # 走到這裡代表不確定的是**進場**那一筆（`uncertain_entry`）。
+        # 舉手投降之前先問一次（ticket 09）——早上推播沒到不代表現在也查不到，
         # 券商主機的紀錄什麼時候問都在，而推播是一次性的。
         #
-        # ⚠️ 登入放在這裡而不是更前面：查詢需要下單元件與帳號，
-        #    而「今天沒有記錄」那條路徑根本不該登入。
-        lots = _resolve_uncertain(broker, record, today)
+        # ⚠️ **開關關著就不查。** 查詢會登入並初始化下單元件
+        #    （`_ensure_order_ready`），而 SPEC 使用者故事 38 要求
+        #    「只發 Discord、不下單」的模式下**完全不呼叫任何下單 API**——
+        #    使用者關掉開關通常正是想切斷程式與券商的連線。
+        #    查不成就照舊發「不確定」那則，訊息本身不需要 broker。
+        lots = (_resolve_uncertain(broker, record, today)
+                if config.auto_order_enabled else None)
         if lots is None:
             # 查詢也答不出來 → 走 ticket 05 定的契約：不知道持有幾口就不准下單。
             reason = "不確定持有幾口，未自動出場"
@@ -697,7 +718,7 @@ def run_exit(
             clear_position(path=state_path)
             return _quiet()
         logger.info("成交查詢補上了答案：早上成交 %d 口，照常出場", lots)
-        record = replace(record, lots=lots, status=CONFIRMED)
+        record = replace(record, lots=lots, status=CONFIRMED, uncertain_stage="")
         write_position(record, path=state_path)
 
     if not config.auto_order_enabled:
@@ -747,8 +768,11 @@ def run_exit(
             # 不知道平掉沒有 → 記成「不確定」。維持 CONFIRMED 的話，記錄上會是
             # 「有 N 口、還沒出場」，那是一個看起來很確定的錯誤。
             write_position(
-                replace(record, lots=None, status=UNCERTAIN, order_seq=exc.order_seq
-                        or record.order_seq),
+                replace(record, lots=None, status=UNCERTAIN,
+                        # **標明不確定的是出場那一筆。** 少了它，重跑時會被當成
+                        # 進場的不確定去查詢與復原，然後再送一次反向委託。
+                        uncertain_stage=UNCERTAIN_EXIT,
+                        order_seq=exc.order_seq or record.order_seq),
                 path=state_path,
             )
             notified = _send(build_exit_unknown_payload(record, str(exc), today))

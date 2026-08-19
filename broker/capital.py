@@ -437,7 +437,18 @@ def _query_rows(text: str) -> list[list[str]]:
     真的成交了的那些口數就沒有人知道，13:40 不會去平，直接進夜盤。
     """
     text = (text or "").strip()
-    if not text or text.startswith(_QUERY_NO_DATA) or text.startswith(_QUERY_ERROR):
+    if not text:
+        return []
+    if text.startswith(_QUERY_NO_DATA):
+        # 查無資料是**正常**的：單還沒進到券商主機的紀錄、或那天根本沒交易。
+        logger.info("查詢回報：查無資料（%s）", _QUERY_NO_DATA)
+        return []
+    if text.startswith(_QUERY_ERROR):
+        # 查詢**故障**。與上面那條長得很像但意思相反，所以等級刻意不同——
+        # 兩者都回 []（絕不可當成「確定沒成交」），但這一種代表後備管道
+        # 自己壞了，而那正是這張票要消滅的處境。log 分不出來的話，
+        # 它會安靜地永遠回 None 而沒有人發現。
+        logger.error("查詢回報：查詢錯誤（%s）：%s", _QUERY_ERROR, text[:120])
         return []
     return [line.split(",") for line in text.splitlines() if line.strip()]
 
@@ -507,9 +518,18 @@ def parse_filled_lots(
             continue
         if fields[_FILL_DAY].strip() != str(trading_day):
             continue
-        if "/" in fields[_FILL_PRODUCT]:
+        if "/" in ",".join(fields):
             # 價差列：一隻腳一列，加總會得到兩倍。OS 自己不下價差單，
             # 所以看到它就代表委託書號認錯了——前提已破，別硬算。
+            #
+            # ⚠️ **看整列，不是只看 `[12]`。** 初版只檢查 `[12]`，而真實的
+            #    價差成交列在那一欄放的是**單腳**代碼（`TMFH6` / `TMFI6`）——
+            #    斜線只出現在最後一欄。那道守衛因此對真實資料完全不會觸發
+            #    （2026-08-19 code-review 實測；當時的測試之所以綠，是被
+            #    「超額口數」那道擋下的，不是被這道）。
+            #
+            #    整列掃是刻意保守：價格、日期、序號都不含斜線，所以誤殺的機會
+            #    很低；而萬一誤殺，結果只是回 None → 維持「不確定」→ 要人看一眼。
             return None
         qty = fields[_FILL_QTY].strip()
         if not qty.isdigit() or int(qty) < 1:

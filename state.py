@@ -44,6 +44,19 @@ CONFIRMED = "CONFIRMED"
 UNCERTAIN = "UNCERTAIN"
 _STATUSES = (CONFIRMED, UNCERTAIN)
 
+# 「不確定」的是**哪一筆委託**。這個區分是 2026-08-19 code-review 抓到的：
+#
+#   進場不確定 → 早上開了幾口不知道 → 下午查得到就照常平倉
+#   出場不確定 → 下午平掉幾口不知道 → **絕對不可以再送一次**
+#
+# 少了它，兩種「不確定」長得一模一樣，而出場那筆的 `order_seq` 記的是
+# **出場單**的序號。重跑時拿它去查，會查到出場單成交的 N 口，程式卻把它
+# 當成「早上成交 N 口」，於是再送一筆等量反向委託——帳上早就平掉了，
+# 第二筆是裸露的反向新倉，沒人管地進夜盤，而狀態檔還說「已了結」。
+UNCERTAIN_ENTRY = "ENTRY"
+UNCERTAIN_EXIT = "EXIT"
+_UNCERTAIN_STAGES = (UNCERTAIN_ENTRY, UNCERTAIN_EXIT)
+
 # 部位是**怎麼**了結的。兩種結局在帳上都是「沒有部位」，但價格來源不同：
 #
 # `BY_EXIT`        我們自己送出反向委託平掉，成交價是期貨價——回測假設的就是這個。
@@ -101,6 +114,9 @@ class PositionRecord:
     # 了結的方式（`BY_EXIT` / `BY_SETTLEMENT`），未了結時為空字串。
     # `exited` 回答「還要不要送單」，這個欄位回答「當天的出場價是哪來的」。
     close_reason: str = ""
+    # 不確定的是**哪一筆委託**（`UNCERTAIN_ENTRY` / `UNCERTAIN_EXIT`）。
+    # 只有 status 為 UNCERTAIN 時才有值——見上方常數的說明。
+    uncertain_stage: str = ""
 
     def __post_init__(self) -> None:
         """殘缺或自相矛盾的記錄比沒有記錄更糟——出場那一班會拿著它去下單。
@@ -134,6 +150,17 @@ class PositionRecord:
             raise ValueError(
                 f"尚未了結的記錄不該有了結方式（目前是 {self.close_reason!r}）"
             )
+        # 「不確定」一定要講清楚是哪一筆不確定。少了它，出場那筆會被當成
+        # 進場那筆處理——重跑時再送一次等量反向委託，開出反向新倉。
+        if self.status == UNCERTAIN and self.uncertain_stage not in _UNCERTAIN_STAGES:
+            raise ValueError(
+                f"不確定的記錄必須註明是哪一筆委託，只能是 {list(_UNCERTAIN_STAGES)}，"
+                f"目前是 {self.uncertain_stage!r}"
+            )
+        if self.status != UNCERTAIN and self.uncertain_stage:
+            raise ValueError(
+                f"已確認的記錄不該有 uncertain_stage（目前是 {self.uncertain_stage!r}）"
+            )
 
     @property
     def exit_side(self) -> str:
@@ -151,6 +178,22 @@ class PositionRecord:
         合約 13:30 停止交易，未平倉部位由交易所以最後結算價現金交割。"""
         from broker import to_yyyymmdd
         return self.last_trading_day == to_yyyymmdd(day)
+
+    @property
+    def uncertain_entry(self) -> bool:
+        """不確定的是**早上那筆進場單**——查得到就能自動復原、照常平倉。"""
+        return self.status == UNCERTAIN and self.uncertain_stage == UNCERTAIN_ENTRY
+
+    @property
+    def uncertain_exit(self) -> bool:
+        """不確定的是**下午那筆出場單**。
+
+        ⚠️ **這種情況絕對不可以自動送單。** 那筆可能已經成交了，再送一次
+        就是在已經平掉的帳上繼續反向賣（或買），開出一個沒人管的新倉。
+        `order_seq` 記的是出場單的序號，拿去查只會查到出場單自己的成交——
+        看起來像「早上成交了 N 口」，那正是危險的地方。
+        """
+        return self.status == UNCERTAIN and self.uncertain_stage == UNCERTAIN_EXIT
 
     @property
     def is_uncertain(self) -> bool:
