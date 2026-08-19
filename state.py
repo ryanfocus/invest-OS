@@ -188,6 +188,24 @@ def read_position(path: str = STATE_PATH) -> PositionRecord | None:
         raise StateCorrupted(f"狀態檔 {path} 缺少欄位：{exc}") from exc
 
 
+def clear_position(path: str = STATE_PATH) -> None:
+    """把狀態檔刪掉。**只在確定「今天沒有部位」時才可以呼叫。**
+
+    為什麼是刪檔而不是寫一筆 `lots=0` 的記錄：`PositionRecord` 的不變量
+    刻意規定 `CONFIRMED` 必須有口數 ≥ 1——這個型別表達的是「OS 開了一個部位」，
+    而「確定沒有部位」在這套設計裡就是**沒有記錄**。進場那條路早就是這樣做的
+    （成交 0 口時直接不寫檔）。
+
+    會用到它的只有一種情況：早上記成「不確定」，下午查詢確認**確實 0 口**。
+    留著那筆不確定的記錄等於讓檔案說謊——它說「不知道」，但我們已經知道了。
+
+    檔案本來就不存在時什麼都不做。
+    """
+    if os.path.exists(path):
+        os.remove(path)
+        logger.info("狀態檔已清除（確認今日無部位）")
+
+
 def write_position(record: PositionRecord, path: str = STATE_PATH) -> None:
     """原子寫入。
 

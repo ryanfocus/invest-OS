@@ -30,6 +30,7 @@ from broker import (
     OpenPrices,
     OrderFailed,
     OrderRequest,
+    OrderResult,
     ProductListUnavailable,
     QuoteNotReady,
     TX_CODE,
@@ -46,10 +47,12 @@ from reconcile import run_reconciliation
 from state import (
     BY_EXIT,
     BY_SETTLEMENT,
+    CONFIRMED,
     STATE_PATH,
     UNCERTAIN,
     PositionRecord,
     StateCorrupted,
+    clear_position,
     read_position,
     write_position,
 )
@@ -163,7 +166,42 @@ def _place_entry_order(
     try:
         result = broker.place_order(request)
     except FillUnknown as exc:
-        # **委託送出去了，但不知道成交幾口。** 先把「我送了單」這件事寫下來，
+        # **委託送出去了，但不知道成交幾口。**
+        #
+        # 舉手投降之前先問一次（ticket 09）。推播（OnNewData）與查詢
+        # （GetOrderReport → GetFulfillReport）走不同元件、不同連線、
+        # 不同通訊方式，失效原因幾乎不重疊——推播沒來最可能的解釋是
+        # 「推播管線壞了」，而那正是查詢救得起來的情況。
+        lots = broker.query_filled_lots(
+            order_seq=exc.order_seq,
+            trading_day=to_yyyymmdd(today),
+            requested_lots=request.lots,
+        )
+        if lots is not None:
+            logger.info("成交查詢補上了答案：%d 口", lots)
+            if lots == 0:
+                # **確定沒成交**——與「查不到」是完全不同的答案。
+                # 不寫記錄，因為下午沒有東西要平；寫了反而會去平一個
+                # 不存在的部位，那筆反向委託會變成新倉。
+                logger.warning("成交查詢確認未成交（0 口），不寫入狀態檔")
+                return OrderResult(filled_lots=0, order_seq=exc.order_seq)
+            write_position(
+                PositionRecord(
+                    trading_day=to_yyyymmdd(today),
+                    product=request.product,
+                    order_code=request.order_code,
+                    contract_month=request.contract_month,
+                    side=request.side,
+                    lots=lots,
+                    requested_lots=request.lots,
+                    last_trading_day=contract.last_trading_day,
+                    order_seq=exc.order_seq,
+                ),
+                path=state_path,
+            )
+            return OrderResult(filled_lots=lots, order_seq=exc.order_seq)
+
+        # 查詢也答不出來 → 維持原本的行為。先把「我送了單」這件事寫下來，
         # 再讓例外往上走。順序不能反——寫檔在後的話，中途出事就什麼記錄都沒有，
         # 下午那班會以為今天沒進場，帳上的部位就直接進夜盤。
         record = PositionRecord(
@@ -218,6 +256,29 @@ def _fetch_official_opens(trading_day: int):
     """
     from taifex import fetch_official_opens
     return fetch_official_opens(trading_day)
+
+
+def _resolve_uncertain(broker, record, today: date) -> int | None:
+    """出場前替一筆「不確定」的記錄問一次成交結果（ticket 09）。
+
+    回 `None` 代表還是不知道 → 走 ticket 05 的老路（不送單、發 Discord 要人處理）。
+
+    **登入放在這裡。** 查詢需要下單元件與帳號，而 `run_exit` 更前面那些路徑
+    （非交易日、沒有今日記錄、結算日）根本不該連線。
+
+    整段不拋例外：這是失敗路徑上的補救措施，自己再炸一次的話，
+    原本只是「要人看一眼」的一天會變成整班掛掉。
+    """
+    try:
+        broker.login()
+        return broker.query_filled_lots(
+            order_seq=record.order_seq,
+            trading_day=record.trading_day,
+            requested_lots=record.requested_lots,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("出場前的成交查詢失敗（%s）：%s", type(exc).__name__, exc)
+        return None
 
 
 def _record_observation(result, opens, contracts, today: date, path: str, send) -> None:
@@ -612,12 +673,32 @@ def run_exit(
         return ExitOutcome(exited=True, remaining=0, notified=notified, exit_code=0)
 
     if record.is_uncertain:
-        # ticket 05 定的契約：不知道持有幾口就不准下單。
-        reason = "不確定持有幾口，未自動出場"
-        logger.error("%s", reason)
-        notified = _send(build_exit_blocked_payload(record, today))
-        return ExitOutcome(exited=False, remaining=None, notified=notified,
-                           exit_code=1, failure=reason)
+        # 舉手投降之前先問一次（ticket 09）。早上推播沒到不代表現在也查不到——
+        # 券商主機的紀錄什麼時候問都在，而推播是一次性的。
+        #
+        # ⚠️ 登入放在這裡而不是更前面：查詢需要下單元件與帳號，
+        #    而「今天沒有記錄」那條路徑根本不該登入。
+        lots = _resolve_uncertain(broker, record, today)
+        if lots is None:
+            # 查詢也答不出來 → 走 ticket 05 定的契約：不知道持有幾口就不准下單。
+            reason = "不確定持有幾口，未自動出場"
+            logger.error("%s", reason)
+            notified = _send(build_exit_blocked_payload(record, today))
+            return ExitOutcome(exited=False, remaining=None, notified=notified,
+                               exit_code=1, failure=reason)
+        if lots == 0:
+            # **確定早上沒成交**——沒有部位，今天什麼都不用做，也不必打擾人。
+            # 與「查不到」是完全不同的答案。
+            # 刪掉那筆「不確定」的記錄，而不是改寫成 0 口——
+            # `PositionRecord` 的不變量刻意規定 CONFIRMED 必須有口數 ≥ 1，
+            # 「確定沒有部位」在這套設計裡就是**沒有記錄**（進場那條也是這樣）。
+            # 留著它等於讓檔案說謊：它說「不知道」，但我們已經知道了。
+            logger.info("成交查詢確認早上未成交，今日無部位")
+            clear_position(path=state_path)
+            return _quiet()
+        logger.info("成交查詢補上了答案：早上成交 %d 口，照常出場", lots)
+        record = replace(record, lots=lots, status=CONFIRMED)
+        write_position(record, path=state_path)
 
     if not config.auto_order_enabled:
         # 開關關著時進場不會寫記錄，所以「有記錄 + 開關關著」代表有人中途關掉了。

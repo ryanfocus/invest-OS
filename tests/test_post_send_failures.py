@@ -170,3 +170,80 @@ def test_a_send_without_a_sequence_number_never_waits_for_fills():
     with pytest.raises(FillUnknown):
         broker.place_order(REQUEST)
     assert waited == [], "不該進入等待迴圈"
+
+
+# --- 成交查詢的兩段之間必須隔五秒（ticket 09）---
+#
+# 官方文件明載「限制每次查詢間需間隔五秒」。不隔的話第二次查詢可能直接被拒，
+# 而被拒的結果是 None——看起來就像「查不到」，於是這條後備管道靜靜地失效，
+# 每天照樣要人介入。那正是本張票要消滅的處境。
+
+
+class _StubQueryOrder(_StubOrder):
+    def __init__(self, order_text="", fulfill_text=""):
+        super().__init__()
+        self.order_text, self.fulfill_text = order_text, fulfill_text
+        self.calls: list = []
+
+    def GetOrderReport(self, user_id, account, fmt):
+        self.calls.append("order")
+        return self.order_text
+
+    def GetFulfillReport(self, user_id, account, fmt):
+        self.calls.append("fulfill")
+        return self.fulfill_text
+
+
+def _query_broker(order_text="", fulfill_text=""):
+    broker = _broker()
+    broker._order = _StubQueryOrder(order_text, fulfill_text)
+    return broker
+
+
+def _order_row(seq="SEQ0000000001", book="x0582", day=20260819):
+    f = [""] * 40
+    f[0], f[7], f[8], f[11] = "TF", book, seq, str(day)
+    return ",".join(f)
+
+
+def test_the_two_queries_are_spaced_out():
+    """兩次查詢之間要等，而且**等在兩者之間**——等在最後面沒有意義。
+
+    ⚠️ 第一段必須查得到委託書號，否則會提早返回而根本不 sleep，
+    這條測試就會因為「沒睡」而失敗（第一版正是如此）。
+    """
+    broker = _query_broker(order_text=_order_row())
+    slept = []
+    broker.query_filled_lots(
+        order_seq="SEQ0000000001", trading_day=20260819, requested_lots=1,
+        sleep=lambda s: slept.append((s, list(broker._order.calls))),
+    )
+    assert slept, "兩段查詢之間完全沒有間隔"
+    seconds, calls_at_that_moment = slept[0]
+    assert seconds >= 5.0, f"間隔只有 {seconds} 秒，文件要求五秒"
+    assert calls_at_that_moment == ["order"], "要等在兩次查詢之間，不是等在最後"
+
+
+def test_no_second_query_when_the_first_finds_nothing():
+    """第一段查不到委託書號就沒有東西可比——白等五秒還多打一次 API。"""
+    broker = _query_broker(order_text="M003")
+    broker.query_filled_lots(
+        order_seq="SEQ0000000001", trading_day=20260819, requested_lots=1,
+        sleep=lambda s: None,
+    )
+    assert broker._order.calls == ["order"]
+
+
+def test_a_query_that_raises_returns_unknown_not_an_exception():
+    """後備管道自己炸掉的話，原本只是「不確定」的一天會變成整班掛掉。"""
+    broker = _broker()
+
+    class _Boom:
+        def GetOrderReport(self, *a):
+            raise RuntimeError("COM 掛了")
+
+    broker._order = _Boom()
+    assert broker.query_filled_lots(
+        order_seq="SEQ0000000001", trading_day=20260819, requested_lots=1,
+        sleep=lambda s: None,
+    ) is None

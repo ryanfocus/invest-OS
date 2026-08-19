@@ -19,6 +19,16 @@ from broker import (
 )
 
 
+class _Unset:
+    """「沒有設定」的哨兵。與 `None` 刻意分開——見 `query_result`。"""
+
+    def __repr__(self) -> str:
+        return "<未設定>"
+
+
+_UNSET = _Unset()
+
+
 class FakeBroker:
     """回放預先安排的回應。
 
@@ -51,6 +61,7 @@ class FakeBroker:
         contracts_error: Exception | None = None,
         order_error: Exception | None = None,
         fills: list | None = None,
+        query_result: object = _UNSET,
     ):
         if script is None and quotes is None:
             script = [OpenPrices(tx=tx, mtx=mtx, tmf=tmf)]
@@ -63,6 +74,13 @@ class FakeBroker:
         self._contracts_error = contracts_error
         self._order_error = order_error
         self._fills = list(fills) if fills is not None else None
+        # 成交查詢（ticket 09 的後備管道）要回什麼。
+        #
+        # `_UNSET` ≠ `None`：**沒設定**代表這個測試不走查詢那條路，查了就是
+        # 測試沒寫對；**明確設成 None** 代表「查了但查不到」，那是要測的狀態之一。
+        # 兩者若共用 None，「忘了設定」與「刻意設成查不到」會長得一模一樣。
+        self._query_result = query_result
+        self.query_calls: list = []
         self.open_price_calls = 0
         self.login_calls = 0
         self.contract_calls = 0
@@ -119,3 +137,20 @@ class FakeBroker:
         else:
             filled = self._fills[0] if len(self._fills) == 1 else self._fills.pop(0)
         return OrderResult(filled_lots=filled, order_seq=f"FAKE{len(self.orders):09d}")
+
+    def query_filled_lots(self, *, order_seq, trading_day, requested_lots, sleep=None):
+        """後備管道：主動問券商主機成交幾口。回 `None` 代表還是不知道。
+
+        記下每次呼叫的參數。**序號要一起斷言**——查詢若拿錯序號，
+        查回來的會是別人的成交，而那比查不到更糟。
+        """
+        self.query_calls.append(
+            {"order_seq": order_seq, "trading_day": trading_day,
+             "requested_lots": requested_lots}
+        )
+        if self._query_result is _UNSET:
+            raise AssertionError(
+                "這個測試沒有安排 query_result，但流程走到了成交查詢。"
+                "要嘛是測試該補上 query_result=，要嘛是程式不該查這一次。"
+            )
+        return self._query_result

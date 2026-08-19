@@ -316,11 +316,21 @@ def test_yesterdays_record_does_not_block_todays_entry(state_file):
 
 
 def _unknown_fill_broker():
+    """推播沒來，**而且 ticket 09 的成交查詢也答不出來**。
+
+    `query_result=None` 是這一組測試的前提：它們驗的是「連查詢都救不回來」
+    之後的行為（記成不確定、告警、重跑不再送單）。
+    查得到的那條路徑由 `test_fill_query_fallback.py` 負責。
+
+    ⚠️ 不寫這個參數的話，假 broker 會直接 AssertionError 而不是靜靜通過——
+    ticket 09 加上查詢那一步時，正是這個哨兵指出這七條測試的前提變了。
+    """
     from broker import FillUnknown
     return FakeBroker(
         script=[LONG_OPENS], contracts=CONTRACTS,
         order_error=FillUnknown("10 秒內委託 SEQ0000000001 仍未結束",
                                 order_seq="SEQ0000000001"),
+        query_result=None,
     )
 
 

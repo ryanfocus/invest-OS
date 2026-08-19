@@ -108,6 +108,24 @@ _REPLY_TYPES = frozenset("NCUPDBS")     # N委託 C取消 U改量 P改價 D成�
 _REPLY_FILLED = "D"        # 成交
 _REPLY_CANCELLED = "C"     # 取消。IOC 的剩餘量會走這裡，收到它才代表委託真的結束
 
+# ── 兩個查詢函式的回傳格式（2026-08-19 實機取得，見
+#    tests/fixtures/reports-2026-08-19.txt）。與 OnNewData 是**三種不同的格式**。
+#
+# ⚠️ **委託序號只在 GetOrderReport 裡，GetFulfillReport 沒有。**
+#    所以後備管道要兩段：先用序號換出「委託書號」，再拿它去比對成交。
+#    串得起兩份的只有委託書號。
+_ORDER_MARKET, _ORDER_BOOK_NO, _ORDER_SEQ, _ORDER_DAY = 0, 7, 8, 11
+_FILL_MARKET, _FILL_BOOK_NO, _FILL_DAY = 0, 7, 9
+_FILL_PRODUCT, _FILL_PRICE, _FILL_QTY = 12, 25, 26
+
+# 查詢的兩種非答案。**必須分開處理**：查無資料是正常的（單還沒成交、
+# 或那天沒交易），查詢錯誤是故障。兩者都不可以當成「確定沒成交」。
+# 官方文件：「限制每次查詢間需間隔五秒」。多留 0.5 秒緩衝。
+_QUERY_INTERVAL_SECONDS = 5.5
+
+_QUERY_NO_DATA = "M003"
+_QUERY_ERROR = "M999"
+
 __all__ = ["CapitalBroker"]
 
 
@@ -223,10 +241,22 @@ def _resolve_dll_path() -> str:
 
 
 class _ReplyEvents:
-    """公告與委託回報的接收端。官方要求登入前註冊，且 OnReplyMessage 必須回傳 -1。"""
+    """公告與委託回報的接收端。官方要求登入前註冊，且 OnReplyMessage 必須回傳 -1。
+
+    **也負責記錄回報連線的真實狀態。** `SKReplyLib_ConnectByID` 回 0
+    只代表「請求已受理」——官方文件把 `OnConnect` / `OnComplete` 列為它的
+    通知事件，連線結果是**非同步**回來的。
+
+    連線若靜默失敗，程式會照常送單、然後永遠等不到 `OnNewData`
+    → 每一天都變成「不確定」→ 每天都要人介入。那正是 ticket 09 要消滅的處境。
+    """
 
     def __init__(self) -> None:
         self.rows: list = []
+        # `None` = 還不知道（事件還沒回來）。**預設不可以是 True**——
+        # 樂觀的預設值等於沒有這個檢查。
+        self.connected: bool | None = None
+        self.connect_error = ""
 
     def OnReplyMessage(self, bstrUserID, bstrMessages):
         return -1
@@ -235,10 +265,18 @@ class _ReplyEvents:
         self.rows.append(bstrData)
 
     def OnConnect(self, bstrUserID, nErrorCode):
-        pass
+        self.connected = nErrorCode == 0
+        if not self.connected:
+            self.connect_error = f"回報連線失敗，代碼 {nErrorCode}"
+            logger.error("%s", self.connect_error)
+        else:
+            logger.info("回報連線已建立")
 
     def OnDisconnect(self, bstrUserID, nErrorCode):
-        pass
+        # 中途斷線與「從未連上」的後果一樣：收不到推播。
+        self.connected = False
+        self.connect_error = f"回報連線中斷，代碼 {nErrorCode}"
+        logger.error("%s", self.connect_error)
 
     def OnComplete(self, bstrUserID):
         pass
@@ -389,6 +427,112 @@ def parse_reply_row(row: str) -> ReplyRow | None:
         failed=fields[_REPLY_ERR].strip() == "Y",
         qty=int(qty),
     )
+
+
+def _query_rows(text: str) -> list[list[str]]:
+    """把查詢回傳切成一列一列的欄位。非答案（空、M003、M999）回空 list。
+
+    **`M003` 與 `M999` 都不是「沒成交」**——前者是查無資料（單可能還沒送到
+    券商主機的紀錄裡），後者是查詢本身故障。當成「確定沒有部位」的話，
+    真的成交了的那些口數就沒有人知道，13:40 不會去平，直接進夜盤。
+    """
+    text = (text or "").strip()
+    if not text or text.startswith(_QUERY_NO_DATA) or text.startswith(_QUERY_ERROR):
+        return []
+    return [line.split(",") for line in text.splitlines() if line.strip()]
+
+
+def parse_order_book_no(text: str, order_seq: str, trading_day: int) -> str | None:
+    """後備管道第一段：用**委託序號**在委託查詢裡找到自己那列，回傳**委託書號**。
+
+    委託序號是 `SendFutureOrderCLR` 給的，也是 `OnNewData` 帶的；
+    但成交查詢裡沒有它（2026-08-19 實測）。委託書號是唯一串得起兩份的欄位。
+
+    ⚠️ **`order_seq` 為空字串時一列都不比。** 空字串是任何字串的子字串——
+    ticket 04 的漏洞就是這樣把別人的成交算成自己的。
+
+    ⚠️ **一定要比日期。** 委託書號的唯一性尚未驗證（每筆唯一？當日唯一？
+    跨日重複？），在那之前日期是唯一擋得住「隔日殘留紀錄被誤認」的東西。
+    """
+    if not order_seq:
+        return None
+
+    for fields in _query_rows(text):
+        if len(fields) <= _ORDER_DAY:
+            continue
+        if fields[_ORDER_MARKET].strip() != _MARKET_FUTURES_REPLY:
+            continue        # 證券、海期走同一條線，格式完全不同
+        if fields[_ORDER_SEQ].strip() != order_seq:
+            continue
+        if fields[_ORDER_DAY].strip() != str(trading_day):
+            continue
+        book_no = fields[_ORDER_BOOK_NO].strip()
+        if book_no:
+            return book_no
+    return None
+
+
+def parse_filled_lots(
+    text: str, order_book_no: str, trading_day: int, requested_lots: int
+) -> int | None:
+    """後備管道第二段：加總這筆委託的成交口數。**認不出來就回 `None`。**
+
+    回 `None` 與回 `0` 是完全不同的答案：
+
+        None  不知道成交幾口 → 維持「不確定」，發 Discord 要人看帳戶
+        0     **確定**沒有成交 → 上層什麼都不做
+
+    所以「找不到成交列」回的是 `None` 而不是 `0`。查詢可能只是還沒反映，
+    而若其實成交了卻記成 0，那個部位就沒有人知道、13:40 不會去平。
+
+    ⚠️ **單腳成交列的欄位位置尚未實機驗證。** 手上唯一的真實樣本是價差單
+    （使用者換倉），單腳的列會不會把第二隻腳那幾欄留白、還是整個往前移，
+    我們不知道——這正是當初把微台 CID 推成 `FITMF` 的同一類錯誤。
+
+    所以除了欄位，還有三道**與欄位位置無關**的檢查：日期要對、口數不得超過
+    委託量、不得是價差列。推錯欄位最可能的症狀是抓到一個不相干的數字，
+    而那三道擋得住它。里程碑 1 送出第一筆真單後要回來把期望值釘死。
+    """
+    if not order_book_no:
+        return None
+
+    total = 0
+    matched = 0
+    for fields in _query_rows(text):
+        if len(fields) <= _FILL_QTY:
+            continue
+        if fields[_FILL_MARKET].strip() != _MARKET_FUTURES_REPLY:
+            continue
+        if fields[_FILL_BOOK_NO].strip() != order_book_no:
+            continue
+        if fields[_FILL_DAY].strip() != str(trading_day):
+            continue
+        if "/" in fields[_FILL_PRODUCT]:
+            # 價差列：一隻腳一列，加總會得到兩倍。OS 自己不下價差單，
+            # 所以看到它就代表委託書號認錯了——前提已破，別硬算。
+            return None
+        qty = fields[_FILL_QTY].strip()
+        if not qty.isdigit() or int(qty) < 1:
+            # 0 口的成交列是矛盾的（沒成交就不該有列），多半是抓到別的欄位。
+            return None
+        try:
+            float(fields[_FILL_PRICE].strip())
+        except ValueError:
+            # 口數與價格必須**同時**說得通。只驗口數的話，欄位整個位移時
+            # 仍可能剛好撿到一個合法的小數字。
+            return None
+        total += int(qty)
+        matched += 1
+
+    if not matched:
+        return None
+    if total > requested_lots:
+        # 委託 1 口卻算出 5 口——不可能是真的，而且是最貴的一種錯：
+        # 下午照 5 口平倉，多出來的變成方向相反的新倉。
+        logger.error("成交查詢算出 %d 口，超過委託的 %d 口，判定為解析錯誤",
+                     total, requested_lots)
+        return None
+    return total
 
 
 class _CenterEvents:
@@ -595,6 +739,50 @@ class CapitalBroker:
             raise ProductListUnavailable(f"{wait:.0f} 秒內未取得完整商品清單")
         return parsed
 
+    def query_filled_lots(
+        self, *, order_seq: str, trading_day: int, requested_lots: int,
+        sleep=time.sleep,
+    ) -> int | None:
+        """推播收不到時的後備管道：**主動問券商主機**這筆委託成交了幾口。
+
+        回 `None` 代表「還是不知道」——上層維持「不確定」的處理（發 Discord
+        要人看帳戶）。**絕不可以把 `None` 當成 0。**
+
+        走兩段是被迫的（2026-08-19 實測）：委託序號只在 `GetOrderReport` 裡，
+        `GetFulfillReport` 沒有。所以先用序號換出委託書號，再拿它去比對成交。
+
+        ⚠️ **中間一定要隔五秒**，官方文件明載「限制每次查詢間需間隔五秒」。
+        這條後備路徑因此最少要 5 秒——08:50 那班還很寬裕，但別搬到更緊的時窗。
+
+        **這個函式不拋例外。** 它是失敗路徑上的補救措施，自己再炸一次的話，
+        原本只是「不確定」的一天會變成整班掛掉。
+        """
+        try:
+            self._ensure_order_ready()
+            if not self._account:
+                logger.warning("沒有期貨帳號，無法查詢成交")
+                return None
+
+            raw = self._order.GetOrderReport(self._user_id, self._account, 1)
+            book_no = parse_order_book_no(raw or "", order_seq, trading_day)
+            if not book_no:
+                logger.info("委託查詢找不到序號 %s 的委託書號", order_seq)
+                return None
+            logger.info("委託 %s 的委託書號為 %s", order_seq, book_no)
+
+            sleep(_QUERY_INTERVAL_SECONDS)
+
+            raw = self._order.GetFulfillReport(self._user_id, self._account, 1)
+            lots = parse_filled_lots(raw or "", book_no, trading_day, requested_lots)
+            if lots is None:
+                logger.info("成交查詢認不出委託書號 %s 的成交列", book_no)
+            else:
+                logger.info("成交查詢：委託書號 %s 成交 %d 口", book_no, lots)
+            return lots
+        except Exception as exc:  # noqa: BLE001
+            logger.error("成交查詢失敗（%s）：%s", type(exc).__name__, exc)
+            return None
+
     def _ensure_order_ready(self) -> None:
         """初始化下單元件、連上回報、取得期貨帳號。
 
@@ -612,6 +800,20 @@ class CapitalBroker:
         code = self._reply.SKReplyLib_ConnectByID(self._user_id)
         if code != 0:
             raise OrderFailed(f"回報連線失敗，{self._message(code)}")
+
+        # ⚠️ **回 0 只代表「請求已受理」。** 連線結果由 OnConnect 非同步送回，
+        #    所以要跑一下訊息幫浦讓事件有機會進來。
+        #
+        #    連不上**不擋下單**：ticket 09 的查詢是獨立的後備管道，
+        #    推播壞掉時它還救得回來。擋下來反而是把「今天可能沒訊號」
+        #    這個更大的代價換一個更小的。但一定要記進 log——
+        #    等不到回報時，這一行是唯一告訴人「該往哪裡查」的東西。
+        self._pump_for(1.0)
+        if self._reply_events.connected is False:
+            logger.error("%s。推播收不到時將改用成交查詢（ticket 09）",
+                         self._reply_events.connect_error)
+        elif self._reply_events.connected is None:
+            logger.warning("回報連線狀態未知（OnConnect 尚未回來）")
 
         # 群益要求下單前先查過帳號，即使我們用的是 .env 指定的那一個
         code = self._order.GetUserAccount()
