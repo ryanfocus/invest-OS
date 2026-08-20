@@ -420,7 +420,7 @@ def save_replies(broker) -> None:
         return
     _save("OnNewData.txt", "\n".join(rows))
     print()
-    _info("下一步（ticket 04 里程碑 1 的交付物）：")
+    _info("下一步（ticket 04 實機里程碑的交付物）：")
     _info("  把其中一列去識別化後放進 tests/，改寫 test_reply_parsing.py——")
     _info("  該檔案現在誠實寫著「不寫欄位位置的測試，因為期望值來自自己的推導」，")
     _info("  有了真實資料才寫得出真的會失敗的斷言")

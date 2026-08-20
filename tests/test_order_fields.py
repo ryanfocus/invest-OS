@@ -90,7 +90,7 @@ def test_account_is_passed_through():
 def test_entry_position_type_is_new_open():
     """sNewClose：0 新倉、1 平倉、2 自動。進場目前送 0。
 
-    ⚠️ **這個值尚未實機驗證**（ticket 04 里程碑 1）。台指期同帳號同商品同月份
+    ⚠️ **這個值尚未實機驗證**（ticket 04 的實機里程碑）。台指期同帳號同商品同月份
     是淨額計算，已有反向部位時「新倉」可能被拒。這條測試不是在說 0 是對的，
     是在確保它**沒有被隨手改掉**——真要改，得帶著實機證據一起改。
     """
@@ -112,7 +112,7 @@ def test_exit_uses_auto_not_close_because_the_order_must_be_able_to_cross_zero()
     ⚠️ 代價要講清楚：若 OS 的部位已經不在了（例如使用者自己手動平掉），
     「自動」會開出一個反向新倉，而「平倉」會被拒。這是真實的取捨，
     選「自動」是因為上面那個情境是**規格確認過的常態**，而部位被手動平掉是例外。
-    仍待里程碑 2 實機驗證。
+    仍待實機里程碑驗證（ticket 04，與進場同一天）。
     """
     assert _fields(intent=EXIT)["sNewClose"] == 2
 

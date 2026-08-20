@@ -74,7 +74,7 @@ def test_a_no_trade_day_still_records_an_observation():
 def test_the_switch_being_off_still_records_an_observation():
     """**這是目前的每一天。** 開關關著時完全不寫部位記錄，
 
-    所以在里程碑 2 之前，觀測記錄是唯一會產生的東西——
+    所以在實機里程碑之前，觀測記錄是唯一會產生的東西——
     也是唯一能驗證「第一階段只跑訊號」那段期間資料是否正確的依據。
     """
     _run(cfg=make_config(auto_order_enabled=False))
