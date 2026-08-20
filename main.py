@@ -458,10 +458,14 @@ def _run_strategy(
         logger.info("今日已有部位記錄（%s %s %s 口，狀態 %s），不重複進場",
                     existing.product, existing.side, existing.lots, existing.status)
 
-        if existing.is_uncertain:
+        if existing.uncertain_entry:
             # ⚠️ **不確定的時候不可以靜默。** 人會再跑一次，多半正是因為想知道
             #    現在怎麼了；這時什麼都不說，看起來就像「已經沒事了」，
             #    但帳上可能還有一個沒人管的部位。
+            #
+            # 用 `uncertain_entry` 而不是 `is_uncertain`：13:40 之後重跑早班時，
+            # 記錄上的不確定可能是**出場**那一筆，而這則訊息講的是
+            # 「早上送出的委託仍未確認成交／方向：買進」——方向與委託都是錯的。
             reason = "早上送出的委託仍未確認成交，狀態尚未解決"
             logger.error("%s", reason)
             _send(build_fill_unknown_payload(existing, reason, today))

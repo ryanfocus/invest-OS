@@ -386,3 +386,38 @@ def test_a_non_futures_row_does_not_contaminate_a_real_one():
         _fill_row(qty="1"),
     ])
     assert parse_filled_lots(text, BOOK, DAY, requested_lots=1) == 1
+
+
+def test_the_sequence_is_matched_exactly_not_as_a_substring():
+    """**這是 ticket 04 那個漏洞在新解析器裡的翻版。**
+
+    序號用子字串比對的話，`23156093941370`（別人的單，多一位數）會被
+    `2315609394137`（我們的）比中，於是拿到別人的委託書號 → 加總別人的成交
+    → 13:40 平錯口數 → 多平的部分變成反向新倉。
+
+    突變測試抓到：把 `!=` 換成子字串比對，424 條測試全綠。
+    """
+    longer = _order_row(seq=SEQ + "0", book="z9999")
+    assert parse_order_book_no(longer, SEQ, DAY) is None
+
+
+def test_a_sequence_that_is_a_prefix_of_ours_is_not_matched():
+    """反方向也要擋：我們的序號含有別人的序號當前綴時。"""
+    shorter = _order_row(seq=SEQ[:-1], book="z9999")
+    assert parse_order_book_no(shorter, SEQ, DAY) is None
+
+
+def test_our_order_is_still_found_among_other_peoples():
+    """對照組：混在一堆別人的單裡面，仍然找得到自己那一列。"""
+    text = "\r\n".join([
+        _order_row(seq=SEQ + "0", book="z9999"),
+        _order_row(),
+        _order_row(seq="9" + SEQ, book="z8888"),
+    ])
+    assert parse_order_book_no(text, SEQ, DAY) == BOOK
+
+
+def test_the_book_number_is_matched_exactly_too():
+    """委託書號同樣不可以用子字串比對——`x058` 不該比中 `x0582`。"""
+    assert parse_filled_lots(_fill_row(book="x05820"), BOOK, DAY,
+                             requested_lots=1) is None

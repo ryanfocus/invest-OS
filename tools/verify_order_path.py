@@ -308,9 +308,50 @@ def query_reports(broker, user_id: str, account: str, redact) -> None:
                 print(f"           {redact(line)}")
             if len(lines) > 5:
                 _info("（只顯示前 5 列，完整內容已存檔）")
+            _check_parsers(label, text, redact)
         _save(f"{label}.txt", text)
         # 文件明載「限制每次查詢間需間隔五秒」
         time.sleep(5.5)
+
+
+def _check_parsers(label: str, text: str, redact) -> None:
+    """**把正式程式的解析器餵給真實資料。**
+
+    這支工具原本只 dump 原始字串，欄位位置要人自己數。但正式解析
+    （`parse_order_book_no` / `parse_filled_lots`）的欄位位置是**從價差單推導**
+    出來的——單腳的列會不會位移，我們並不知道（ticket 09 未完成項）。
+
+    只 dump 的話，那個未知數要等到某天真的收不到推播、後備管道悄悄回 None
+    才會被發現。在這裡跑一次，至少能看出它認不認得出眼前這份真實資料。
+
+    ⚠️ 這裡**只印結果，不判定對錯**——工具不知道正確答案是什麼。
+    要人自己對照上面的原始字串看：抓出來的委託書號、口數，是不是那一列真正的值。
+    """
+    from broker.capital import parse_filled_lots, parse_order_book_no
+
+    first = text.splitlines()[0].split(",")
+    if len(first) <= 11:
+        return
+    day = first[11].strip() if label == "GetOrderReport" else first[9].strip()
+    if not day.isdigit():
+        _info("（認不出交易日期欄，跳過解析檢查）")
+        return
+
+    print()
+    _info("--- 正式解析器對這份真實資料的結果 ---")
+    if label == "GetOrderReport":
+        seq = first[8].strip()
+        book = parse_order_book_no(text, seq, int(day))
+        _info(f"序號 {redact(seq)} → 委託書號 {book!r}")
+        if book is None:
+            _fail("正式解析器認不出這份資料——欄位位置可能已經漂移")
+    else:
+        book = first[7].strip()
+        for lots in (1, 2, 10):
+            got = parse_filled_lots(text, book, int(day), requested_lots=lots)
+            _info(f"委託書號 {book!r} 委託 {lots} 口 → 成交 {got!r}")
+        _info("→ 請自己對照原始字串確認：那幾列真正的成交口數是多少？")
+        _info("  （價差單會被刻意拒絕回 None，那是正確行為）")
 
 
 def listen(broker, seconds: float, redact) -> int:

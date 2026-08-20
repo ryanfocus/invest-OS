@@ -311,3 +311,142 @@ def test_a_full_exit_failure_cycle_does_not_double_up():
              notify=RecordingNotifier(), sleep=lambda _s: None, state_path=state_path())
     assert second.orders == [], "重跑不可以再送一次——帳上可能早就平掉了"
     assert read_position(path=state_path()).exited is False,         "沒有證據就不可以標成已了結"
+
+
+# ─────────────────────────────────────────────────────────
+# 🔴 進場側真正寫進檔案的東西
+# ─────────────────────────────────────────────────────────
+#
+# 突變測試（2026-08-19 第二輪）抓到：把進場寫檔的 `uncertain_stage` 從
+# ENTRY 改成 EXIT，**424 條測試全綠**。那是本輪剛修好的那個 bug 的鏡像——
+# 下午會拒絕平倉，部位整晚沒人管。
+#
+# 原因是上面那些測試用的都是 `_uncertain_record()` 這個**自己造的** fixture，
+# 從來沒有驗過 `run_entry` 真正寫下什麼。手工組的記錄測不到寫入端。
+
+
+def test_entry_marks_the_uncertainty_as_belonging_to_the_entry_order():
+    """**寫錯這個值的後果是下午拒絕平倉。**
+
+    出場那班看到 `uncertain_stage=EXIT` 會判定「那筆可能已經成交，不准再送」，
+    於是早上開的部位一張單都不平，直接進夜盤。
+    """
+    from state import UNCERTAIN_ENTRY
+    _entry(query_result=None)
+    record = read_position(path=state_path())
+    assert record.uncertain_stage == UNCERTAIN_ENTRY
+    assert record.uncertain_entry is True
+    assert record.uncertain_exit is False
+
+
+def test_an_uncertain_entry_is_actually_closed_that_afternoon():
+    """端到端把上一條的後果釘死：早上不確定 → 下午查得到 → **真的送出平倉單**。
+
+    只斷言欄位值的話，欄位對了但下游判斷寫反一樣測不出來。
+    這條走真正的資料流（進場寫、出場讀），不是手工組的記錄。
+    """
+    _entry(query_result=None)
+    broker = FakeBroker(query_result=2)
+    run_exit(make_config(auto_order_enabled=True), today=D, broker=broker,
+             notify=RecordingNotifier(), sleep=lambda _s: None, state_path=state_path())
+    assert [(o.side, o.lots) for o in broker.orders] == [(SELL, 2)]
+
+
+class _QueryExplodes(FakeBroker):
+    """查詢會炸的假 broker。
+
+    真的 `query_filled_lots` 保證不拋例外，所以正式環境不會走到這裡——
+    但那個保證是**它自己**的，`_place_entry_order` 不該依賴它。
+    寫檔與查詢的順序若反過來，這個 broker 就會讓狀態檔完全不存在。
+    """
+
+    def query_filled_lots(self, **kwargs):
+        raise RuntimeError("COM 掛了")
+
+
+def test_the_order_is_recorded_before_the_query_is_attempted():
+    """**送出委託後的第一件事必須是寫檔。**
+
+    查詢是補救措施；寫檔是「我送了一張單」這個既成事實的唯一記錄。
+    先查的話，查詢那一步一拋例外就什麼都沒寫——13:40 會以為今天沒進場，
+    帳上的部位直接進夜盤，而早上的 Discord 還說「委託沒有送出去」。
+
+    突變測試抓到：把 `write_position` 移到查詢之後，424 條測試全綠。
+    """
+    broker = _QueryExplodes(
+        script=[OPENS], contracts=CONTRACTS,
+        order_error=FillUnknown("逾時未收到回報", order_seq="SEQ0000000001"),
+    )
+    run_entry(
+        make_config(auto_order_enabled=True), today=D, broker=broker,
+        notify=RecordingNotifier(), sleep=lambda _s: None,
+        state_path=state_path(), observations_path=observations_path(),
+        fetch_official=lambda day: None,
+    )
+    record = read_position(path=state_path())
+    assert record is not None, "查詢炸掉不可以讓「我送了一張單」這件事消失"
+    assert record.is_uncertain and record.uncertain_entry
+
+
+def test_an_exploding_query_still_lets_the_afternoon_ask_for_help():
+    """而且下午那班要能正常走到「請人工處理」，不是也跟著炸掉。"""
+    broker = _QueryExplodes(
+        script=[OPENS], contracts=CONTRACTS,
+        order_error=FillUnknown("逾時", order_seq="SEQ0000000001"),
+    )
+    run_entry(
+        make_config(auto_order_enabled=True), today=D, broker=broker,
+        notify=RecordingNotifier(), sleep=lambda _s: None,
+        state_path=state_path(), observations_path=observations_path(),
+        fetch_official=lambda day: None,
+    )
+    _, notifier, exit_broker = _exit(query_result=None, record=read_position(
+        path=state_path()))
+    assert exit_broker.orders == []
+    assert "不確定持有幾口" in notifier.text
+
+
+def test_rerunning_the_entry_stage_does_not_misdescribe_an_uncertain_exit():
+    """13:40 之後重跑早班時，記錄上的不確定可能是**出場**那一筆。
+
+    「早上送出的委託仍未確認成交／方向：買進」那則訊息講的是進場單，
+    而實際不確定的是那筆**賣出**的出場單——商品、方向、委託全都指錯。
+    人照著它去券商 APP 查，會查一筆早就成交的單而以為沒事。
+
+    突變測試抓到：把這裡的 `uncertain_entry` 換回 `is_uncertain`，
+    436 條測試全綠。
+    """
+    from state import UNCERTAIN_EXIT
+    write_position(
+        _uncertain_record(uncertain_stage=UNCERTAIN_EXIT, order_seq="EXIT_SEQ_999"),
+        path=state_path(),
+    )
+    broker = FakeBroker(script=[OPENS], contracts=CONTRACTS)
+    notifier = RecordingNotifier()
+    run_entry(
+        make_config(auto_order_enabled=True), today=D, broker=broker,
+        notify=notifier, sleep=lambda _s: None,
+        state_path=state_path(), observations_path=observations_path(),
+        fetch_official=lambda day: None,
+    )
+    assert broker.orders == [], "今日已有記錄，不可以重複進場"
+    assert "早上送出的委託" not in notifier.text, "那是進場單的說法，這裡不確定的是出場單"
+
+
+def test_rerunning_the_entry_stage_still_flags_an_uncertain_entry():
+    """對照組：不確定的**確實是進場**那一筆時，仍然要講出來。
+
+    少了這條，上面那條可以靠「乾脆都不發」通過——而那會讓
+    「早上送了單卻不知道成交幾口」在重跑時變成靜默。
+    """
+    write_position(_uncertain_record(), path=state_path())
+    broker = FakeBroker(script=[OPENS], contracts=CONTRACTS)
+    notifier = RecordingNotifier()
+    run_entry(
+        make_config(auto_order_enabled=True), today=D, broker=broker,
+        notify=notifier, sleep=lambda _s: None,
+        state_path=state_path(), observations_path=observations_path(),
+        fetch_official=lambda day: None,
+    )
+    assert broker.orders == []
+    assert "早上送出的委託" in notifier.text

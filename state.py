@@ -105,6 +105,10 @@ class PositionRecord:
     # ⚠️ 刻意**沒有預設值**。給 0 當預設的話，缺這個欄位的舊狀態檔會讓
     #    `is_settlement_day` 永遠回 False——結算日的「不重試」規則被靜默關掉。
     #    現在缺欄位會在 `read_position` 就拋 StateCorrupted。
+    #
+    #    ⚠️ 這一招只對**沒有預設值**的欄位有效。有預設值的欄位（如
+    #    `uncertain_stage`）缺了不會拋 TypeError，會一路走到不變量檢查——
+    #    所以 `read_position` 兩種例外都要攔（見那裡的說明）。
     last_trading_day: int
     status: str = CONFIRMED
     order_seq: str = ""
@@ -229,6 +233,24 @@ def read_position(path: str = STATE_PATH) -> PositionRecord | None:
         return PositionRecord(**data)
     except TypeError as exc:
         raise StateCorrupted(f"狀態檔 {path} 缺少欄位：{exc}") from exc
+    except ValueError as exc:
+        # ⚠️ **不變量違反也是「讀不懂」，不可以讓它逃出去。**
+        #
+        # `__post_init__` 的每一條檢查都是防線，但它們同時在讀取路徑上開了
+        # 一個崩潰面：`ValueError` 逃出 `read_position` 的話，早班與午班都會
+        # 直接以 traceback 結束，**連一則 Discord 都發不出去**——
+        # 而這份檔案開頭就寫著讀不懂要「大聲失敗，交給人處理」，
+        # 大聲失敗到告警都發不出來就不是那個意思了。
+        #
+        # 兩種來源都真實存在：
+        #   1. **舊版程式寫的檔案**。有預設值的新欄位（如 `uncertain_stage`）
+        #      不會觸發上面的 TypeError，而是在不變量那關才炸。
+        #   2. **使用者手改**。本模組的設計說明明講「必要時手改」，
+        #      改出自相矛盾的內容是預期內的事，不是異常。
+        #
+        # 訊息與缺欄位刻意分開：對照著告警排查的人來說，
+        # 「少了東西」與「內容互相矛盾」要找的地方不一樣。
+        raise StateCorrupted(f"狀態檔 {path} 的內容自相矛盾：{exc}") from exc
 
 
 def clear_position(path: str = STATE_PATH) -> None:

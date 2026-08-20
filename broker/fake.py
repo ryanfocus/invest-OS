@@ -143,6 +143,18 @@ class FakeBroker:
 
         記下每次呼叫的參數。**序號要一起斷言**——查詢若拿錯序號，
         查回來的會是別人的成交，而那比查不到更糟。
+
+        ⚠️ **與真 broker 的兩處刻意不同，都寫在這裡免得日後被當成 bug：**
+
+        1. `query_result` 沒設定時**拋 AssertionError**，而真的保證不拋例外。
+           那是測試用的哨兵：它要抓的是「程式走到了不該查的地方」。
+           真的不會這樣做（那會讓補救措施自己把整班弄掛）。
+           要模擬「查詢炸掉」請自己繼承覆寫，別依賴這個哨兵。
+
+        2. 真的**不可能**回傳超過委託口數（`parse_filled_lots` 有上限守衛，
+           推錯欄位最常見的症狀就是抓到一個不相干的大數字）。假的以前照收，
+           於是測試組得出來的情境在正式環境根本不會發生——那種測試證明不了事。
+           現在假的也擋。
         """
         self.query_calls.append(
             {"order_seq": order_seq, "trading_day": trading_day,
@@ -152,5 +164,11 @@ class FakeBroker:
             raise AssertionError(
                 "這個測試沒有安排 query_result，但流程走到了成交查詢。"
                 "要嘛是測試該補上 query_result=，要嘛是程式不該查這一次。"
+            )
+        if self._query_result is not None and self._query_result > requested_lots:
+            raise AssertionError(
+                f"query_result={self._query_result} 超過委託的 {requested_lots} 口。"
+                "真的 broker 有上限守衛，回不出這個值——這個測試在模擬一個"
+                "正式環境不會發生的情境。"
             )
         return self._query_result

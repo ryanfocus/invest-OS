@@ -342,3 +342,58 @@ def test_the_uncertain_stage_survives_a_write_and_read(tmp_path):
                      uncertain_stage=UNCERTAIN_EXIT)
     write_position(record, path=str(path))
     assert read_position(path=str(path)).uncertain_exit is True
+
+
+# --- 讀不懂就是讀不懂：不變量違反也要變成 StateCorrupted ---
+#
+# ⚠️ 2026-08-19 抓到的：`read_position` 只攔 `TypeError`（缺欄位），
+#    `__post_init__` 的 `ValueError` 會**一路逃出去**，讓早班與午班都以
+#    traceback 結束而**一則 Discord 都發不出來**。
+#
+#    這份檔案開頭就寫著讀不懂要「大聲失敗，交給人處理」——
+#    大聲到告警都發不出去就不是那個意思。
+#
+#    每加一條不變量，就等於在讀取路徑上多開一個崩潰面。所以攔的是
+#    `ValueError` 這個**類別**，不是某一條特定的檢查。
+
+
+def test_a_file_written_by_an_older_version_is_reported_not_crashed(tmp_path):
+    """舊版程式寫下的 UNCERTAIN 記錄沒有 `uncertain_stage`。
+
+    有預設值的欄位缺了**不會**觸發 TypeError，而是走到不變量那關才炸。
+    """
+    path = tmp_path / "position.json"
+    old = {
+        "trading_day": 20260819, "product": MTX_CODE, "order_code": "MTX08",
+        "contract_month": "202608", "side": BUY, "lots": None, "requested_lots": 2,
+        "last_trading_day": 20260916, "status": UNCERTAIN, "order_seq": "SEQ001",
+        "exited": False, "close_reason": "",
+    }
+    path.write_text(json.dumps(old), encoding="utf-8")
+    with pytest.raises(StateCorrupted):
+        read_position(path=str(path))
+
+
+def test_a_hand_edited_contradiction_is_reported_not_crashed(tmp_path):
+    """本模組的設計說明明講「必要時手改」——改出矛盾是預期內的事。"""
+    path = tmp_path / "position.json"
+    broken = {**RECORD.__dict__, "lots": 0}          # CONFIRMED 卻 0 口
+    path.write_text(json.dumps(broken), encoding="utf-8")
+    with pytest.raises(StateCorrupted):
+        read_position(path=str(path))
+
+
+def test_the_two_kinds_of_unreadable_are_described_differently(tmp_path):
+    """「少了東西」與「內容互相矛盾」要找的地方不一樣。
+
+    對照著 Discord 告警排查的人，靠的就是這句話的差別。
+    """
+    path = tmp_path / "position.json"
+    missing = {k: v for k, v in RECORD.__dict__.items() if k != "last_trading_day"}
+    path.write_text(json.dumps(missing), encoding="utf-8")
+    with pytest.raises(StateCorrupted, match="缺少欄位"):
+        read_position(path=str(path))
+
+    path.write_text(json.dumps({**RECORD.__dict__, "lots": 0}), encoding="utf-8")
+    with pytest.raises(StateCorrupted, match="自相矛盾"):
+        read_position(path=str(path))

@@ -470,3 +470,36 @@ def test_a_zero_fill_exit_leaves_the_whole_position():
     record = read_position(path=state_path())
     assert record.exited is False
     assert record.lots == 2
+
+
+def test_an_old_format_state_file_alerts_instead_of_crashing(tmp_path):
+    """**升級後第一天最危險的一種檔案。**
+
+    c18bb3e 之前寫下的「不確定」記錄沒有 `uncertain_stage`。修正之前，
+    那個檔案會讓 13:40 這一班以 traceback 結束而**一則 Discord 都不發**——
+    使用者完全不知道帳上可能還有部位。
+
+    現在它是「狀態檔異常」告警，人看得到、也知道要去查什麼。
+    """
+    import json
+    from broker import BUY, MTX_CODE
+    path = state_path()
+    old = {
+        "trading_day": 20260810, "product": MTX_CODE, "order_code": "MTX08",
+        "contract_month": "202608", "side": BUY, "lots": None, "requested_lots": 2,
+        "last_trading_day": 20260819, "status": "UNCERTAIN", "order_seq": "SEQ001",
+        "exited": False, "close_reason": "",
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(old, fh)
+
+    broker = FakeBroker()
+    notifier = RecordingNotifier()
+    outcome = run_exit(
+        make_config(auto_order_enabled=True), today=D, broker=broker,
+        notify=notifier, sleep=lambda _s: None, state_path=path,
+    )
+    assert broker.orders == [], "讀不懂就不准送單"
+    assert notifier.sent != [], "而且一定要講出來"
+    assert "狀態檔" in notifier.text
+    assert outcome.exit_code == 1
