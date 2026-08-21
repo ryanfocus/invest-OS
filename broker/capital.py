@@ -816,6 +816,21 @@ class CapitalBroker:
         if code != 0:
             raise OrderFailed(f"下單元件初始化失敗，{self._message(code)}")
 
+        # ⚠️ **讀憑證。少了這一步，送出委託會被回 1038 SK_ERROR_CERT_NOT_VERIFIED。**
+        #
+        # 2026-08-21 實機里程碑第一次真的送出委託時就是被這個擋下的。憑證本身
+        # 完全正常——裝了、沒過期、有私鑰、CN 與登入 ID 相符、電腦裡只有一張。
+        # 純粹是程式漏了這一行。
+        #
+        # 為什麼之前沒發現：**看報價、查商品清單、查委託成交都不需要憑證，
+        # 只有送出委託需要。** 所以這個洞在真的下單之前不可能浮出來。
+        #
+        # 在這裡失敗比在送單時失敗好得多：1038 的訊息是「Cert Not Verified」，
+        # 要人自己去猜是哪一步漏了；這裡可以直接說「憑證讀取失敗」。
+        code = self._order.ReadCertByID(self._user_id)
+        if code != 0:
+            raise OrderFailed(f"憑證讀取失敗，{self._message(code)}")
+
         # 回報連線。沒有它就收不到 OnNewData，也就不知道成交幾口。
         code = self._reply.SKReplyLib_ConnectByID(self._user_id)
         if code != 0:

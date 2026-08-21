@@ -40,15 +40,18 @@ order:
   #    「不小心把開著的設定 commit 上來」。
   #
   # 🚦 **絕不允許在沒有實機測過 API 下單的情況下開啟。**
-  #    下單路徑目前一次都沒有執行過——SendFutureOrderCLR、SKReplyLib_ConnectByID、
-  #    OnNewData 全部沒跑過。假 broker 的測試只證明「程式照我想的方式運作」，
+  #    假 broker 的測試只證明「程式照我想的方式運作」，
   #    不證明「群益會照我想的方式回應」。
   #
-  #    要開之前，四項全部要完成（詳見 .scratch/os-strategy/README.md 的真錢里程碑）：
-  #      1. tools/verify_order_path.py 全綠（零風險）
-  #      2. 真單送出過，進場倉別經實測確認（ticket 04 里程碑 1）
-  #      3. 完整來回跑過，出場倉別經實測確認（ticket 06 里程碑 2）
-  #      4. nOpen 在 08:50 與期交所一致（見 tools/compare_open.py）
+  #    進度（2026-08-21 實機里程碑完成）：
+  #      ✅ tools/verify_order_path.py 全綠（零風險，2026-08-16／17）
+  #      ✅ SKReplyLib_ConnectByID 與 OnNewData 實機驗證（2026-08-17）
+  #      ✅ nOpen 與期交所一致（三來源，2026-08-18／19）
+  #      ✅ **SendFutureOrderCLR 實機驗證**（2026-08-21，1 口微台完整來回）
+  #         進場 sNewClose=0 未被拒、出場 sNewClose=2 正確平倉
+  #      ⚠️ **但只驗到「同方向持倉」那一半**——使用者當時持有多單、OS 也做多，
+  #         全程沒有跨越零。「已有反向部位時」的行為仍未驗證，見
+  #         .scratch/os-strategy/issues/04-entry-order-and-position-state.md
   #
   #    臨時開啟做上述驗證是預期用法，但**驗完要改回 false，且不可 commit 開啟的狀態**。
   auto_enabled: false

@@ -247,3 +247,88 @@ def test_a_query_that_raises_returns_unknown_not_an_exception():
         order_seq="SEQ0000000001", trading_day=20260819, requested_lots=1,
         sleep=lambda s: None,
     ) is None
+
+
+# --- 下單前必須讀憑證（2026-08-21 實機里程碑抓到）---
+#
+# 第一次真的送出委託時被擋下：代碼 1038 SK_ERROR_CERT_NOT_VERIFIED。
+#
+# 憑證本身完全正常——裝了、沒過期（剩 351 天）、有私鑰、CN 與登入 ID 相符、
+# 而且電腦裡只有一張群益憑證。問題在**程式漏了一步**：
+# `SKOrderLib_Initialize` 之後必須 `ReadCertByID(user_id)` 把憑證載進來。
+#
+# 看報價、查商品清單、查委託成交都不需要憑證，只有**送出委託**需要——
+# 所以這個洞在真的下單之前不可能被發現。這正是實機里程碑存在的理由，
+# 而且它零成本就抓到了：委託在送出那一步就被擋下，沒有部位產生。
+
+
+class _StubOrderWithCert(_StubOrder):
+    """記錄下單元件上被呼叫過的方法與順序。"""
+
+    def __init__(self, cert_code=0):
+        super().__init__()
+        self.calls: list = []
+        self._cert_code = cert_code
+
+    def SKOrderLib_Initialize(self):
+        self.calls.append("init")
+        return 0
+
+    def ReadCertByID(self, user_id):
+        self.calls.append(f"cert:{user_id}")
+        return self._cert_code
+
+    def GetUserAccount(self):
+        self.calls.append("account")
+        return 0
+
+
+def _cert_broker(cert_code=0):
+    broker = CapitalBroker("U1234", "pw", environment="test", account="F9990001234567")
+    broker._center = object()
+    broker._order = _StubOrderWithCert(cert_code)
+    broker._reply = type("R", (), {"SKReplyLib_ConnectByID": lambda self, uid: 0})()
+    broker._reply_events = type("E", (), {"connected": True, "connect_error": ""})()
+    broker._sk = _StubSk()
+    broker._message = lambda code: f"代碼 {code}"
+    broker._pump_for = lambda seconds: None
+    return broker
+
+
+def test_the_certificate_is_read_before_ordering():
+    """**沒有這一步，送出委託會被回 1038。**"""
+    broker = _cert_broker()
+    broker._ensure_order_ready()
+    assert "cert:U1234" in broker._order.calls
+
+
+def test_the_certificate_is_read_after_the_order_lib_is_initialised():
+    """順序有意義：元件還沒初始化就讀憑證，讀不到東西。"""
+    broker = _cert_broker()
+    broker._ensure_order_ready()
+    calls = broker._order.calls
+    assert calls.index("init") < calls.index("cert:U1234")
+
+
+def test_a_failed_certificate_read_stops_before_any_order():
+    """**憑證讀不到就別送單。**
+
+    送了也只會被回 1038，而那個錯誤訊息（「Cert Not Verified」）
+    要人自己去猜是哪一步漏了——2026-08-21 那次就花了時間才定位到。
+    在這裡失敗，訊息可以直接說「憑證讀取失敗」。
+    """
+    broker = _cert_broker(cert_code=1038)
+    with pytest.raises(OrderFailed, match="憑證"):
+        broker._ensure_order_ready()
+
+
+def test_the_certificate_is_not_read_twice():
+    """`_ensure_order_ready` 會被重複呼叫（進場一次、查詢一次）。
+
+    憑證讀取要走網路驗證，重複做只是拖時間——而 08:50 的每一秒都在
+    逼近開盤價的有效窗口。
+    """
+    broker = _cert_broker()
+    broker._ensure_order_ready()
+    broker._ensure_order_ready()
+    assert broker._order.calls.count("cert:U1234") == 1

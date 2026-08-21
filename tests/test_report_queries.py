@@ -37,6 +37,7 @@ import pytest
 
 from broker.capital import parse_filled_lots, parse_order_book_no
 
+CRLF = chr(13) + chr(10)     # 群益查詢回傳的換行
 DAY = 20260819
 SEQ = "2315609394137"
 BOOK = "x0582"
@@ -421,3 +422,157 @@ def test_the_book_number_is_matched_exactly_too():
     """委託書號同樣不可以用子字串比對——`x058` 不該比中 `x0582`。"""
     assert parse_filled_lots(_fill_row(book="x05820"), BOOK, DAY,
                              requested_lots=1) is None
+
+
+# ─────────────────────────────────────────────────────────
+# ✅ 單腳格式：**實機驗證完成**（2026-08-21 實機里程碑）
+# ─────────────────────────────────────────────────────────
+#
+# 本檔開頭那段「單腳欄位位置尚未實機驗證」的警告，到這裡結束。
+#
+# OS 自己送出 1 口微台，取回真實的單腳回傳。答案是：**欄位不會位移，
+# 第二隻腳的欄位是留白／0**。所以從價差單推出來的
+# `_FILL_PRODUCT/_FILL_PRICE/_FILL_QTY = 12, 25, 26` 是對的。
+#
+# 這幾條的價值在於**它們是對著真實資料斷言的**，不是對著我的推導。
+
+
+def _singleleg() -> tuple[str, str]:
+    """2026-08-21 實機里程碑的委託與成交查詢（各兩列：出場在前、進場在後）。"""
+    path = os.path.join(os.path.dirname(__file__), "fixtures",
+                        "reports-singleleg-2026-08-21.txt")
+    with open(path, encoding="utf-8") as fh:
+        lines = [ln.strip() for ln in fh if ln.startswith("TF,")]
+    # 委託查詢的列比成交查詢長很多（60+ 欄 vs 45 欄），用長度分得開，
+    # 不必依賴標題文字——標題會隨列數改寫，而那正好在 2026-08-21 咬過一次。
+    order = [ln for ln in lines if len(ln.split(",")) > 55]
+    fulfill = [ln for ln in lines if len(ln.split(",")) <= 55]
+    return CRLF.join(order), CRLF.join(fulfill)
+
+
+def _fill_rows() -> tuple[str, str]:
+    """回傳（進場那列, 出場那列）。"""
+    _, fulfill = _singleleg()
+    rows = fulfill.splitlines()
+    entry = next(r for r in rows if r.split(",")[21] == "B")
+    exit_ = next(r for r in rows if r.split(",")[21] == "S")
+    return entry, exit_
+
+
+SL_DAY = 20260821
+SL_SEQ = "2315609807637"          # 進場的委託序號
+SL_BOOK = "g0106"                 # 進場的委託書號
+SL_EXIT_SEQ = "2315609905580"     # 出場的
+SL_EXIT_BOOK = "s0838"
+
+
+def test_the_real_single_leg_order_yields_its_book_number():
+    order, _ = _singleleg()
+    assert parse_order_book_no(order, SL_SEQ, SL_DAY) == SL_BOOK
+
+
+def test_the_real_single_leg_fill_is_counted_correctly():
+    """**這是整個 ticket 09 最重要的一條斷言。**
+
+    1 口的委託、1 口的成交。若 `_FILL_QTY` 的位置是錯的，這裡會抓到
+    別的數字——而下午就會照那個數字平倉。
+
+    ⚠️ 資料裡有**兩筆**（進場與出場），所以這條同時在驗「只算自己那一筆」——
+    委託書號比對若失效，會得到 2。
+    """
+    _, fulfill = _singleleg()
+    assert parse_filled_lots(fulfill, SL_BOOK, SL_DAY, requested_lots=1) == 1
+
+
+def test_the_single_leg_fill_price_position_is_real():
+    """口數對不代表位置對——也可能是剛好撿到另一個 1。
+
+    價格那欄一起驗：44838 進、45135 出，都是當天真實的成交價。
+    兩個位置同時對，才排除得掉「碰巧」。
+    """
+    from broker.capital import _FILL_PRICE
+    entry, exit_ = _fill_rows()
+    assert float(entry.split(",")[_FILL_PRICE]) == 44838.0
+    assert float(exit_.split(",")[_FILL_PRICE]) == 45135.0
+
+
+def test_the_second_leg_fields_are_blank_not_shifted():
+    """**這才是先前不知道、而且推錯會很貴的那件事。**
+
+    價差單在 `[17][18]` 放第二隻腳的 CID 與月份。單腳若是「整個往前移」，
+    `[25]` 與 `[26]` 就會指到別的東西。實機證實是**留白**，不是位移。
+    """
+    for row in _fill_rows():
+        f = row.split(",")
+        assert f[17].strip() == "", "第二隻腳的 CID 應該是空的"
+        assert float(f[20]) == 0.0, "第二隻腳的價格應該是 0"
+        assert f[13].strip() == "FITM", "第一隻腳仍在原位"
+
+
+def test_another_days_single_leg_fill_is_not_counted():
+    """日期守衛對真實的單腳資料一樣有效。"""
+    _, fulfill = _singleleg()
+    assert parse_filled_lots(fulfill, SL_BOOK, 20260820, requested_lots=1) is None
+
+
+def test_the_two_real_book_numbers_have_nothing_in_common():
+    """`x0582`（08-19 價差）與 `g0106`（08-21 單腳）——格式完全不同。
+
+    委託書號**不是有規律的流水號**，任何想從它解析出意義的念頭都要打消：
+    它只該被當成不透明的比對用字串。
+    """
+    assert not SL_BOOK.startswith("x")
+    assert len(SL_BOOK) == len(BOOK)      # 長度巧合，但字元集不同
+
+
+def test_the_entry_and_exit_fills_differ_only_where_expected():
+    """進場與出場的成交列並列，**只有六個欄位不同**。
+
+    這條是「記錄」而不是「能力」——我們刻意**不寫程式去讀倉別欄位**
+    （2026-08-21 決定：兩個樣本撐不起一個抽象，而 N/O 的含義未經證實）。
+    但把差異釘住有價值：日後格式若變、或某個欄位開始跟著別的東西動，
+    這裡會紅，而不是等到某天平倉單被當成新倉才發現。
+    """
+    entry, exit_ = _fill_rows()
+    e, x = entry.split(","), exit_.split(",")
+    differing = {i for i in range(len(e)) if e[i] != x[i]}
+    assert differing == {7, 8, 10, 21, 25, 27, 37, 43, 49}, (
+        "進出場成交列的差異欄位變了。原本是："
+        "[7]委託書號 [8]成交編號 [10]時間 [21]買賣別 [25]成交價 [27]倉別 "
+        "[37]時間（第二次出現）[43]成交價（第二次出現）[49]毫秒時戳"
+    )
+
+
+def test_the_price_and_time_each_appear_twice():
+    """`[25]`/`[43]` 是同一個價格，`[10]`/`[37]` 是同一個時間。
+
+    ⚠️ 這條是 2026-08-21 寫上一條時**自己抓到的**：原本只斷言六個欄位，
+    因為我只數了前半段。對著真實資料斷言才會發現後面還有重複的欄位。
+
+    價值：解析若哪天改抓 `[43]` 而不是 `[25]`，行為不變、測試也不會紅——
+    釘住「它們相等」，那個沉默的改動至少有一條測試在描述它。
+    """
+    for row in _fill_rows():
+        f = row.split(",")
+        assert f[25] == f[43], "成交價出現兩次，值應相同"
+        assert f[10] == f[37], "時間出現兩次，值應相同"
+
+
+def test_the_position_type_field_reflects_what_we_sent():
+    """**這是實機里程碑最重要的觀察，但它只是觀察。**
+
+    我們送出：進場 `sNewClose=0`（新倉）、出場 `sNewClose=2`（自動）。
+    回報的 `[27]` 分別是 `N` 與 `O`——**送出的值不同，回來的也不同**。
+
+    ⚠️ `N`/`O` 的確切含義文件沒寫，是從這兩筆對照推的（最可能 New／Offset）。
+    真正的證據是使用者的帳戶從 2 口變回 1 口——`sNewClose=2` 確實**平了倉**，
+    沒有開出反向新倉。那正是 ticket 06 擔心的失效模式沒有發生。
+
+    這條測試守的是「這個觀察不會被悄悄改掉」，不是「N/O 一定是那個意思」。
+    """
+    entry, exit_ = _fill_rows()
+    assert entry.split(",")[27] == "N", "進場（sNewClose=0）當時回報的是 N"
+    assert exit_.split(",")[27] == "O", "出場（sNewClose=2）當時回報的是 O"
+    assert entry.split(",")[27] != exit_.split(",")[27], (
+        "**這才是重點**：兩者不同，代表券商沒有把出場也當成新倉"
+    )
