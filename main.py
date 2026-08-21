@@ -66,7 +66,7 @@ from notifiers.discord import (
     build_fill_unknown_payload,
     build_observation_conflict_payload,
     build_partial_exit_payload,
-    build_settlement_payload,
+    build_settlement_uncertain_payload,
     build_no_signal_payload,
     build_order_failed_payload,
     build_signal_payload,
@@ -667,12 +667,24 @@ def run_exit(
         # 代價是當日損益以現貨指數的結算價計算，與用期貨價的回測有落差。
         # 那是已知且有界的，不是風險——見 SPEC「結算日」。
         logger.info("今天是結算日，部位交由交易所現金結算，不送出場委託")
+        # ⚠️ 那天的損益會與回測對不起來：最後結算價是 13:00–13:30 加權指數
+        #    每筆成交價的簡單算術平均——**現貨指數，不是期貨價**。
+        #    記進 log 與狀態檔的 close_reason，而**不發 Discord**：
+        #    出場那班只有「有事不對勁」才推播（2026-08-21 定案），
+        #    而結算日什麼都沒錯——合約到期、部位一定會被平掉、不需要人做任何事。
+        logger.info("⚠️ 結算價為現貨指數平均，當日損益會與用期貨價的回測有落差")
         write_position(
             replace(record, exited=True, close_reason=BY_SETTLEMENT),
             path=state_path,
         )
-        notified = _send(build_settlement_payload(record, today))
-        return ExitOutcome(exited=True, remaining=0, notified=notified, exit_code=0)
+        if record.is_uncertain:
+            # **但這一種要講。** 部位會照樣被結算，可是早上不知道成交幾口
+            # 這件事結算不會補上——使用者仍然要去對那筆帳，
+            # 否則那天的損益永遠是個謎。這不是「出場成功」，是「有事不對勁」。
+            notified = _send(build_settlement_uncertain_payload(record, today))
+            return ExitOutcome(exited=True, remaining=None, notified=notified,
+                               exit_code=1, failure="結算日，但不知道持有幾口")
+        return ExitOutcome(exited=True, remaining=0, notified=False, exit_code=0)
 
     if record.uncertain_exit:
         # ⚠️ **不確定的是出場那一筆——一張單都不准再送。**

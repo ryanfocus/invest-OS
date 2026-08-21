@@ -225,34 +225,24 @@ def test_settlement_day_sends_no_exit_order_at_all():
     assert outcome.exit_code == 0, "交易所會結算，這不是失敗"
 
 
-def test_settlement_day_still_tells_the_user_once():
-    """一則告知。不發的話，使用者會以為 13:40 那班掛了。"""
-    _, notifier, _ = _run(_record(trading_day=20260819), today=SETTLEMENT)
-    assert len(notifier.sent) == 1
-    text = notifier.sent[0]["content"]
-    assert "結算" in text
+def test_a_settled_position_does_not_notify():
+    """**結算日不發 Discord。**
 
+    2026-08-21 使用者定案：出場那班**只有失敗才推播**，沒有例外。
+    結算日什麼事都沒發生錯——合約到期、部位由交易所平掉，不需要人做任何事。
 
-def test_the_settlement_notice_does_not_ask_for_manual_action():
-    """**這一則不能長得像告警。**
-
-    舊行為在結算日會發出「請立刻手動送出：賣出 2 口 MTX08」——
-    那是一件做不到的事，合約已經停止交易了。照著做只會在別的月份開新倉。
+    初版會發一則「告知」，理由是「當日損益會與回測對不起來，不講的話
+    日後查帳會以為程式算錯」。那個理由仍然成立，但改用不打擾人的方式記錄：
+    log、狀態檔的 `close_reason=SETTLEMENT`、以及 SPEC 的〈結算日的現金結算價〉。
     """
     _, notifier, _ = _run(_record(trading_day=20260819), today=SETTLEMENT)
-    text = notifier.sent[0]["content"]
-    assert "手動" not in text
-    assert "🚨" not in text
+    assert notifier.sent == []
 
 
-def test_the_settlement_notice_says_the_price_comes_from_the_spot_index():
-    """結算價是現貨指數的平均，不是期貨價，所以當日損益跟回測對不起來。
-
-    不先講的話，日後查帳時那個落差看起來會像程式算錯。
-    """
-    _, notifier, _ = _run(_record(trading_day=20260819), today=SETTLEMENT)
-    text = notifier.sent[0]["content"]
-    assert "現貨" in text
+def test_a_settled_position_still_finishes_cleanly():
+    """不發訊息不代表出事——結束狀態要是正常的，排程才不會誤報。"""
+    outcome, _, _ = _run(_record(trading_day=20260819), today=SETTLEMENT)
+    assert outcome.exit_code == 0
 
 
 def test_settlement_marks_the_record_closed_by_settlement():
@@ -275,30 +265,38 @@ def test_an_ordinary_exit_is_marked_as_closed_by_us():
     assert read_position(path=state_path()).close_reason == BY_EXIT
 
 
-def test_settlement_day_does_not_send_even_when_the_switch_is_off():
+def test_settlement_day_stays_silent_even_when_the_switch_is_off():
     """開關關著＋結算日：舊路徑會發「部位過夜沒人知道」的告警，但它不會過夜。
 
-    走到開關那條的訊息會叫使用者去手動平倉——同樣是做不到的事。
+    走到開關那條的訊息會叫使用者去手動平倉——那是做不到的事（合約已停止交易）。
+    現在兩條都不發：沒事發生錯，就不打擾人。
     """
     _, notifier, broker = _run(_record(trading_day=20260819),
                                cfg=make_config(auto_order_enabled=False),
                                today=SETTLEMENT)
     assert broker.orders == []
-    assert "手動" not in notifier.sent[0]["content"]
+    assert notifier.sent == []
 
 
-def test_settlement_day_with_an_uncertain_record_still_flags_the_uncertainty():
-    """部位會照樣被結算，但**早上不知道成交幾口這件事，結算不會補上**。
+def test_settlement_day_with_an_uncertain_record_does_alert():
+    """**這一條是例外，而且是對的例外。**
 
-    只發一則平靜的「已結算」而不提這個，使用者就永遠不會去對這筆帳。
+    「只有失敗才推播」裡的「失敗」不是指「送單失敗」，是指**有事不對勁**。
+    部位會照樣被結算沒錯，但**早上不知道成交幾口這件事，結算不會補上**——
+    使用者仍然需要去對那筆帳，否則那天的損益永遠是個謎。
+
+    與上面那條的差別：那條沒有任何事情不對，這條有。
     """
     _, notifier, broker = _run(
-        _record(trading_day=20260819, lots=None, status=UNCERTAIN, uncertain_stage=UNCERTAIN_ENTRY),
+        _record(trading_day=20260819, lots=None, status=UNCERTAIN,
+                uncertain_stage=UNCERTAIN_ENTRY),
         today=SETTLEMENT,
     )
     assert broker.orders == [], "不確定持有幾口，更不能送單"
+    assert len(notifier.sent) == 1
     text = notifier.sent[0]["content"]
     assert "不知道" in text and "對帳" in text
+    assert "手動" not in text, "合約已停止交易，叫人手動平倉是做不到的事"
 
 
 def test_an_ordinary_day_does_retry():
