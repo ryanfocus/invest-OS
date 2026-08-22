@@ -37,6 +37,7 @@ from broker import (
     to_yyyymmdd,
 )
 from calendar_tw import is_trading_day
+from housekeeping import LOGS_PATH, purge_old_logs
 from observations import (
     OBSERVATIONS_PATH,
     Observation,
@@ -324,6 +325,7 @@ def run_entry(
     sleep=time.sleep,
     state_path: str,
     observations_path: str,
+    logs_path: str = LOGS_PATH,
     fetch_official=None,
 ) -> EntryOutcome:
     """進場那一班的完整流程：策略跑完，再對前一交易日的帳。
@@ -365,6 +367,14 @@ def run_entry(
             logger.error("對帳：%s 有 %d 項不一致", result.checked_day, len(result.mismatches))
         else:
             logger.info("對帳：%s 一致", result.checked_day)
+
+        # 最後的最後：清掉超過保留期限的日誌。
+        #
+        # 放在這裡而不是另開一個排程，是為了少一個「換電腦時會忘記重建」的東西
+        # （2026-08-21 與使用者確認）。位置與對帳一樣在所有事情之後，
+        # 而且 `purge_old_logs` 保證不拋例外——清理不值得讓一天原本成功的
+        # 執行以 traceback 收場。
+        purge_old_logs(logs_path)
 
     return outcome
 

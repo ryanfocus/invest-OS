@@ -12,6 +12,8 @@ COM 元件壞掉、訊息幫浦拋例外、回報主機斷線——都**不能**
 沒有這個檔案時，把 `except Exception` 那條拿掉，211 個測試依然全綠。
 """
 
+import os
+
 import pytest
 
 from broker import BUY, ENTRY, FillUnknown, MTX_CODE, OrderFailed, OrderRequest
@@ -332,3 +334,133 @@ def test_the_certificate_is_not_read_twice():
     broker._ensure_order_ready()
     broker._ensure_order_ready()
     assert broker._order.calls.count("cert:U1234") == 1
+
+
+# --- 保存券商回覆的原始內容（2026-08-21 缺口三）---
+#
+# 券商成交後會回一段訊息。程式從裡面挑出「成交幾口」就把整段丟掉了，
+# 於是：
+#
+#   1. 出事時沒有原始資料可以回頭看
+#   2. ticket 04／06 的「平倉回報原始字串」永遠拿不到——再下十次真單也一樣
+#
+# 存的是**視窗內收到的全部內容**，不只我們自己那筆。2026-08-19 就是靠
+# 「別人的單也在同一條線上」這個證據，才發現序號比對的漏洞。
+
+
+class _RecordingReplies:
+    def __init__(self, rows=None):
+        self.rows = list(rows or [])
+
+
+def _reply_row(seq="SEQ0000000001", row_type="D", qty="1", tail="x"):
+    """一列格式合法的 TF 回報。太短的列會被解析器當成看不懂而跳過，
+    於是委託永遠不會「結束」——第一版的測試就是栽在這裡。"""
+    f = [""] * 49
+    f[0], f[1], f[2], f[3] = seq, "TF", row_type, "N"
+    f[20] = qty
+    f[47] = seq
+    f[48] = tail
+    return ",".join(f)
+
+
+def _saving_broker(tmp_path, *, rows=(), message="SEQ0000000001"):
+    """回覆在**送單之後**才到。
+
+    ⚠️ 第一版把回覆預先放進去，結果全部被 `since` 跳過（那個位移正是
+    為了「只算我們送單之後收到的」而存在的）。回覆改由訊息幫浦在
+    等待期間注入，才是真實的時序。
+
+    委託會不會「結束」由 `rows` 的內容決定：湊得滿委託口數就結束，
+    湊不滿就走 FillUnknown——兩種都要存下原始回覆。
+    """
+    broker = _broker(message=message)
+    broker._reply_events = _RecordingReplies()
+    broker._replies_dir = str(tmp_path)
+
+    def pump(predicate, timeout):
+        broker._reply_events.rows.extend(rows)
+
+    broker._pump_until = pump
+    return broker
+
+
+def _saved(tmp_path):
+    return sorted(p for p in os.listdir(str(tmp_path)) if "reply" in p or "replies" in p)
+
+
+def test_the_saved_file_holds_every_row_in_the_window(tmp_path):
+    """**存整個視窗，不只自己那筆。**
+
+    2026-08-19 的換倉價差單就出現在 OS 自己的回報串流上——那份證據
+    是靠「別人的單也在」才成立的。只存自己那筆就看不到了。
+    """
+    ours = _reply_row(tail="ours")
+    theirs = _reply_row(seq="OTHERSEQ", tail="someone-else")
+    broker = _saving_broker(tmp_path, rows=[ours, theirs])
+    broker.place_order(REQUEST)
+    files = _saved(tmp_path)
+    assert files, "應該要有一個存檔"
+    text = open(os.path.join(str(tmp_path), files[0]), encoding="utf-8").read()
+    assert ours in text and theirs in text
+
+
+def test_rows_that_arrived_before_our_order_are_not_saved(tmp_path):
+    """**只存我們送單之後那段視窗。**
+
+    回報頻道是共用的：登入之後、送單之前，別人的成交就可能已經流進來了。
+    那些與這筆委託無關，存進來只會讓日後排查的人以為它們有關聯。
+
+    突變測試抓到：把 `rows[since:]` 改成 `rows`，全部測試照樣綠——
+    因為那時每條測試的緩衝區都是從空的開始，`since` 剛好是 0。
+    """
+    earlier = _reply_row(seq="BEFORE_OUR_ORDER", tail="not-ours")
+    broker = _saving_broker(tmp_path, rows=[_reply_row()])
+    broker._reply_events.rows.append(earlier)      # 送單之前就在緩衝區裡
+    broker.place_order(REQUEST)
+    files = _saved(tmp_path)
+    text = open(os.path.join(str(tmp_path), files[0]), encoding="utf-8").read()
+    assert "BEFORE_OUR_ORDER" not in text, "送單前就在的回覆不屬於這一筆"
+    assert "SEQ0000000001" in text
+
+
+def test_the_filename_carries_the_order_sequence(tmp_path):
+    """找得到才有用。序號是把檔案與那筆委託對起來的唯一線索。"""
+    broker = _saving_broker(tmp_path, rows=[_reply_row()])
+    broker.place_order(REQUEST)
+    assert any("SEQ0000000001" in f for f in _saved(tmp_path))
+
+
+def test_replies_are_saved_even_when_the_fill_is_unknown(tmp_path):
+    """**收不到回報那天最需要原始資料**——那正是要回頭查的時候。
+
+    只在成功時存的話，能查的都是不必查的。
+    """
+    # 只有別人的回覆進來，我們那筆永遠湊不滿 → FillUnknown
+    broker = _saving_broker(tmp_path, rows=[_reply_row(seq="OTHERSEQ")])
+    with pytest.raises(FillUnknown):
+        broker.place_order(REQUEST)
+    assert _saved(tmp_path), "不確定的那天也要留下證據"
+
+
+def test_a_failed_save_does_not_mask_the_real_exception(tmp_path):
+    """**這是本組最重要的一條。**
+
+    存檔跑在 `finally` 裡，而 `finally` 拋出的例外會**取代**正在傳遞的那個。
+    所以存檔一旦出錯，使用者收到的會是「寫檔失敗」而不是「收不到成交回報」——
+    真正該處理的問題被蓋掉，而且蓋得無聲無息。
+    """
+    broker = _saving_broker(tmp_path, rows=[_reply_row(seq="OTHERSEQ")])
+    broker._replies_dir = str(tmp_path / "blocked" / "deeper")
+    (tmp_path / "blocked").write_text("我是檔案不是目錄", encoding="utf-8")
+    with pytest.raises(FillUnknown):        # 不是 OSError／NotADirectoryError
+        broker.place_order(REQUEST)
+
+
+def test_a_failed_save_does_not_turn_a_good_order_into_a_failure(tmp_path):
+    """委託成交了就是成交了。存檔失敗只是少一份參考資料，
+    不該讓一筆成功的下單變成錯誤——那會讓 13:40 去平一個記錄不存在的部位。"""
+    broker = _saving_broker(tmp_path, rows=[_reply_row()])
+    broker._replies_dir = str(tmp_path / "blocked" / "deeper")
+    (tmp_path / "blocked").write_text("我是檔案不是目錄", encoding="utf-8")
+    broker.place_order(REQUEST)     # 不該拋

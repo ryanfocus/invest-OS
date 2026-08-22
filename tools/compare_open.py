@@ -130,7 +130,11 @@ def capital_quotes(broker=None) -> dict:
     return result
 
 
-SAMPLE_LOG = os.path.join(_ROOT, "captured", "open-price-samples.jsonl")
+# ⚠️ **放 state/ 而不是 logs/。** 這是**累積型**的樣本紀錄——「群益的 nOpen
+#    與期交所差 2 點是常態還是偶發」要靠它累積幾週才判斷得出來。
+#    logs/ 每 30 天會被清掉（housekeeping），那會毀掉正在累積的東西。
+#    state/ 是累積型資料的家，清理不碰它。
+SAMPLE_LOG = os.path.join(_ROOT, "state", "open-price-samples.jsonl")
 
 
 def _append_sample(date_str: str, samples: list) -> None:
@@ -158,7 +162,7 @@ def _append_sample(date_str: str, samples: list) -> None:
     # 而這只是一行提示訊息，不值得為它讓整支工具掛掉。
     print(f"\n本次結果已附加到 captured/{os.path.basename(SAMPLE_LOG)}"
           f"（累積 {total} 次）")
-    print("  這個檔案不含帳號，但也沒進版控（captured/ 在 .gitignore 內）")
+    print("  這個檔案不含帳號，但也沒進版控（state/ 在 .gitignore 內）")
 
 
 def main() -> int:

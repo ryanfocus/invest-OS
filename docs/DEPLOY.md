@@ -1,0 +1,190 @@
+# 部署與接手
+
+這份文件回答一個問題：**這台電腦壞了，怎麼在另一台上把系統重建起來？**
+
+在它之前，答案散在幾次對話與我的記憶裡。少做任何一步，系統會用不同的方式失敗，
+而且不一定馬上看得出來。
+
+---
+
+## 換機器要重做什麼
+
+| # | 步驟 | 為什麼不能跳 | 大概要多久 |
+|---|------|------------|----------|
+| 1 | 安裝 Python 與虛擬環境 | 排程直接指向 `.venv\Scripts\python.exe` | 10 分 |
+| 2 | 安裝並註冊群益 COM 元件 | 沒註冊的話程式連 `import` 都會失敗 | 15 分 |
+| 3 | **申請下單憑證** | **憑證綁電腦**，舊機器的不能複製過來 | 30 分（含簡訊驗證） |
+| 4 | 填 `.env` | 帳密與 webhook 都不在版控裡 | 5 分 |
+| 5 | 建立排程 | 執行 `tools\setup_schedule.ps1` | 1 分 |
+| 6 | 確認機器不會睡著 | 睡著就不會醒來跑 | 5 分 |
+| 7 | **把舊機器的 `state/` 複製過來** | **裡面是重建不回來的稽核歷史** | 1 分 |
+
+第 3 步與第 7 步最容易被忽略，而它們的後果最不對稱——見下方的說明。
+
+---
+
+## 1. Python 與虛擬環境
+
+```powershell
+cd <專案資料夾>
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+⚠️ **排程寫死了 `.venv\Scripts\python.exe` 這個路徑**（見 `tools/run_stage.cmd`）。
+用別的方式管理環境（conda、全域 Python）的話，那個路徑要跟著改。
+
+驗收：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+全綠代表程式本身沒問題。**但那不代表能連上券商**——那 460 多條測試跑的是假 broker。
+
+---
+
+## 2. 群益 COM 元件
+
+詳見 [LOGIN_SETUP.md](LOGIN_SETUP.md) Step 3～4。重點：
+
+- **要整組複製**，不能只搬 `SKCOM.dll`
+- 以系統管理員身分執行 `install.bat` 註冊
+- 註冊之後程式才找得到它（路徑是從註冊表反查的，不寫死）
+
+---
+
+## 3. 下單憑證 ⚠️
+
+詳見 [LOGIN_SETUP.md](LOGIN_SETUP.md) Step 2。
+
+**憑證是綁這台電腦的。** 舊機器上的不能複製，必須重新申請，而且會收一次簡訊驗證碼。
+
+⚠️ **看報價不需要憑證，只有送出委託需要。**
+
+這代表你可以在憑證還沒裝好的情況下，看到訊號正常、Discord 正常、對帳正常——
+然後在真的要下單那一刻被擋下來（代碼 **1038** `SK_ERROR_CERT_NOT_VERIFIED`）。
+2026-08-21 第一次送真單就是這樣。
+
+驗收（不會下單，唯讀）：
+
+```powershell
+.\.venv\Scripts\python.exe tools\verify_order_path.py --listen 5
+```
+
+那支工具會走完下單前的每一步，包含讀憑證。它的自我檢查會拒絕執行任何提到
+送單函式的程式碼，所以**不可能不小心下到單**。
+
+---
+
+## 4. `.env`
+
+複製 `.env.example` 成 `.env`，填四個值：
+
+```
+CAPITAL_USER_ID           身分證字號
+CAPITAL_PASSWORD          群益登入密碼
+CAPITAL_FUTURES_ACCOUNT   分公司代碼 4 碼 + 帳號 7 碼
+DISCORD_WEBHOOK_URL       發訊號用
+```
+
+期貨帳號第一次可以留空，用 `tools\verify_login.py --show-account` 查出來再填。
+
+---
+
+## 5. 排程
+
+```powershell
+.\tools\setup_schedule.ps1          # 建立／重建
+.\tools\setup_schedule.ps1 -Show    # 只看現況
+.\tools\setup_schedule.ps1 -Remove  # 全部移除
+```
+
+建立兩個每天執行的工作：**08:50 進場**、**13:40 出場**。
+
+⚠️ **排程不管自動下單的開關。** 兩班一律每天叫起來，由程式自己讀
+`config/settings.yaml` 決定要不要下單。把開關的狀態編進排程，
+等於多一個「開開關時會忘記」的地方——而漏掉的那次，早上會開倉、
+下午沒有東西去平它。
+
+### 排程掛了怎麼發現
+
+**平日早上沒收到訊號訊息。** 就這樣，沒有別的機制。
+
+刻意不做心跳或偵測：每天那則訊號本身就是心跳，再加一則只是噪音。
+發現沒收到就重跑 `setup_schedule.ps1`。
+
+---
+
+## 6. 機器不會睡著
+
+排程只在機器醒著時才跑得起來。要確認三件事：
+
+```powershell
+powercfg /query SCHEME_CURRENT SUB_SLEEP    # 閒置待機、休眠都要是 0（永不）
+```
+
+還有：
+
+- **喚醒計時器**要啟用
+- **自動登入**（`AutoAdminLogon`）—— 群益的憑證裝在使用者帳號底下，
+  排程必須用「只在使用者登入時執行」，所以半夜 Windows Update 重開之後
+  要能自動登回桌面
+- **Windows Update 的作用中時間**要涵蓋 08:50，把重開窗口壓到收盤後
+
+> 📌 鎖屏（Win+L）**不影響**執行——2026-08-16 實測過：鎖著螢幕時登入、
+> 連報價主機、連回報主機、查帳號全部正常。鎖屏算「已登入」。
+
+---
+
+## 7. 把 `state/` 複製過來 ⚠️
+
+```
+state/
+  observations.jsonl           每個交易日一行，隔日對帳的依據
+  open-price-samples.jsonl     群益 vs 期交所的比對樣本
+  position.json                當天的部位（隔天就沒用了）
+```
+
+**前兩個是累積型的稽核歷史，重建不回來。**
+
+`observations.jsonl` 是每天的三個開盤價與訊號——它是驗證「開盤價有沒有取錯盤別」
+唯一的依據，而那種錯誤會讓每天的訊號都錯、從數字本身完全看不出來。
+
+`open-price-samples.jsonl` 是在累積一個還沒有答案的問題：2026-08-10 群益給的
+大台開盤價比期交所多 2 點，其他天都一樣。要判斷那是偶發還是常態，得累積幾週。
+
+`position.json` 不用複製——那是當日的東西。
+
+---
+
+## 日誌與保留期限
+
+`logs/` 裡有**三種來源**的東西：
+
+| 來源 | 例子 | 敏感資訊 |
+|------|------|---------|
+| 我們自己寫的 | `entry-20260821.log` | 無 |
+| 券商回覆的原始存檔 | `replies-*.txt`、`Get*Report.txt` | ⚠️ **期貨帳號**，未遮罩 |
+| **群益元件自己寫的** | `Center.log`、`Reply.log` | ⚠️ **身分證字號** |
+
+第三種是 2026-08-21 才發現的：群益的 COM 元件會自己往工作目錄寫日誌，
+檔名與內容我們都控制不了。
+
+**全部保留 30 天**，由 `housekeeping.purge_old_logs` 在每天早上那班的最後面清掉。
+那不只是省空間，是**限制個資留在磁碟上的時間**。
+
+⚠️ **`logs/` 不要整包傳給任何人**，也不要放進會同步到雲端的資料夾。
+它已經排除在版控之外。
+
+---
+
+## 上線前的硬性關卡
+
+`config/settings.yaml` 的 `order.auto_enabled` 是唯一的切換點。開啟之前，
+[ticket 08](../.scratch/os-strategy/issues/08-scheduling-and-deployment.md)
+列的關卡要全部達成。目前的狀態寫在那張票裡。
+
+⚠️ **不可以 commit 開啟的狀態。** 有一條測試守著這件事
+（`test_shipped_config_has_auto_ordering_switched_off`）——臨時開啟做驗證是
+預期用法，但驗完要改回來，而那條測試會在你忘記時變紅。

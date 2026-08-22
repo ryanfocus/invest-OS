@@ -299,3 +299,50 @@ def test_a_non_trading_day_does_not_reconcile():
     called = []
     _run(today=WEEKEND, fetch_official=lambda day: called.append(day) or None)
     assert called == []
+
+
+# --- 日誌清理掛在最後面 ---
+
+
+def test_old_logs_are_purged_at_the_end_of_the_morning_run(tmp_path):
+    """`logs/` 裡有群益元件自己寫的日誌（含身分證字號）與券商回覆存檔
+    （含期貨帳號），而且會一直長。清理跟在每天那班的最後面，不另開排程——
+    少一個「換電腦時會忘記重建」的東西。
+    """
+    import os, time
+    from housekeeping import LOG_RETENTION_DAYS
+    old = tmp_path / "ancient.log"
+    old.write_text("x", encoding="utf-8")
+    stamp = time.time() - (LOG_RETENTION_DAYS + 5) * 86400
+    os.utime(str(old), (stamp, stamp))
+
+    run_entry(
+        make_config(), today=D,
+        broker=FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS),
+        notify=RecordingNotifier(), sleep=lambda _s: None,
+        state_path=state_path(), observations_path=observations_path(),
+        logs_path=str(tmp_path), fetch_official=lambda day: None,
+    )
+    assert not old.exists()
+
+
+def test_a_non_trading_day_does_not_bother_purging(tmp_path):
+    """非交易日的約定是「什麼都不做」。清理也算「做事」——
+
+    而且那天連 `logs/` 都不會有新東西進來，沒有清的理由。
+    """
+    import os, time
+    from housekeeping import LOG_RETENTION_DAYS
+    old = tmp_path / "ancient.log"
+    old.write_text("x", encoding="utf-8")
+    stamp = time.time() - (LOG_RETENTION_DAYS + 5) * 86400
+    os.utime(str(old), (stamp, stamp))
+
+    run_entry(
+        make_config(), today=WEEKEND,
+        broker=FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS),
+        notify=RecordingNotifier(), sleep=lambda _s: None,
+        state_path=state_path(), observations_path=observations_path(),
+        logs_path=str(tmp_path), fetch_official=lambda day: None,
+    )
+    assert old.exists()

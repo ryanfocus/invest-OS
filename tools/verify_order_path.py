@@ -57,7 +57,15 @@ _ROOT = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)
 
 # 捕獲的原始資料存這裡。**內容含交易帳號，不進版控**（見 .gitignore）。
-CAPTURE_DIR = os.path.join(_ROOT, "captured")
+# 原始存檔與執行紀錄合併在同一個資料夾（2026-08-21 與使用者確認）。
+#
+# 分兩個資料夾這件事本來就沒成立：群益的 COM 元件早就自己在往 logs/ 寫
+# 它自己的日誌了。而兩邊的東西其實是同一類——跑出來的、平常不看、
+# 出事才回頭查、都含敏感資訊、都不進版控、都留 30 天。
+#
+# 一條保留規則比兩條安全：兩個資料夾意味著兩個清理設定，
+# 而漏掉一個的後果就是那些帳號一直留著。
+CAPTURE_DIR = os.path.join(_ROOT, "logs")
 
 # 禁止出現在本檔案裡的名稱。前綴 Send 是群益所有送單函式的共同開頭；
 # place_order 是正式程式的下單入口（本工具會 import CapitalBroker，

@@ -23,6 +23,7 @@ r"""群益策略王 COM 元件的 broker 實作。
 from __future__ import annotations
 
 import logging
+import os
 import time
 import winreg
 from dataclasses import dataclass
@@ -623,6 +624,11 @@ class CapitalBroker:
         self._monitoring = False
         self._subscribed = False
         self._order_ready = False
+        # 券商回覆的原始存檔要寫到哪。可覆寫，讓測試用 tmp_path。
+        # ⚠️ 內容未遮罩（含期貨帳號）——`logs/` 在 .gitignore 內，
+        #    且由 housekeeping.purge_old_logs 於 30 天後清除。
+        from housekeeping import LOGS_PATH
+        self._replies_dir = LOGS_PATH
 
     # --- 內部：COM 生命週期 ---
 
@@ -924,6 +930,39 @@ class CapitalBroker:
                 f"等待委託 {seq} 的回報時發生非預期錯誤（{type(exc).__name__}）：{exc}",
                 order_seq=seq,
             ) from exc
+        finally:
+            # 不管成功、失敗、還是不確定，都把券商回的原始內容留下來。
+            # **收不到回報那天最需要它**——那正是要回頭查的時候，
+            # 而只在成功時存的話，能查的都是不必查的。
+            self._save_raw_replies(seq, since=before)
+
+    def _save_raw_replies(self, seq: str, since: int) -> None:
+        """把這次委託期間收到的回覆原封不動存成一個檔案。
+
+        存**整個視窗**收到的全部內容，不只我們自己那筆——2026-08-19 就是靠
+        「別人的單也在同一條線上」這個證據，才發現序號比對的漏洞。
+
+        ⚠️ **這個函式跑在 `finally` 裡，所以它絕對不可以拋例外。**
+        `finally` 拋出的東西會**取代**正在傳遞的那個例外，於是使用者收到的
+        會是「寫檔失敗」而不是「收不到成交回報」——真正該處理的問題被蓋掉，
+        而且蓋得無聲無息。同理，它也不可以把一筆成功的下單變成失敗。
+
+        ⚠️ **內容未遮罩**（含期貨帳號）。`logs/` 已在 .gitignore 內，
+        且由 `housekeeping.purge_old_logs` 於 30 天後清除。
+        """
+        try:
+            rows = self._reply_events.rows[since:]
+            if not rows:
+                return
+            directory = self._replies_dir
+            os.makedirs(directory, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            path = os.path.join(directory, f"replies-{stamp}-{seq}.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(chr(10).join(rows) + chr(10))
+            logger.info("已存下 %d 列原始回覆：%s", len(rows), os.path.basename(path))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("原始回覆存檔失敗（%s）：%s", type(exc).__name__, exc)
 
     def _await_fill(self, seq: str, since: int, requested_lots: int) -> OrderResult:
         """等到這筆委託確定結束為止，回傳實際成交口數。
