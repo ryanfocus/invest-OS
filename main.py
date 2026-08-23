@@ -17,7 +17,9 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, replace
-from datetime import date
+# `time` 這個名字已經被標準函式庫的 time 模組佔走（給 time.sleep 用），
+# 所以 datetime.time 改叫 clock——它代表的是牆上時鐘的時刻。
+from datetime import date, datetime, time as clock
 
 import strategy
 from broker import (
@@ -64,6 +66,7 @@ from notifiers.discord import (
     build_exit_failed_payload,
     build_exit_state_broken_payload,
     build_exit_unknown_payload,
+    build_entry_too_late_payload,
     build_fill_unknown_payload,
     build_observation_conflict_payload,
     build_partial_exit_payload,
@@ -349,10 +352,11 @@ def run_entry(
     broker,
     notify,
     *,
+    now: clock,
     sleep=time.sleep,
     state_path: str,
     observations_path: str,
-    logs_path: str = LOGS_PATH,
+    logs_path: str | None = None,
     fetch_official=None,
 ) -> EntryOutcome:
     """進場那一班的完整流程：策略跑完，再對前一交易日的帳。
@@ -366,6 +370,7 @@ def run_entry(
     """
     outcome = _run_strategy(
         config, today, broker, notify,
+        now=now,
         sleep=sleep, state_path=state_path, observations_path=observations_path,
     )
 
@@ -401,7 +406,10 @@ def run_entry(
         # （2026-08-21 與使用者確認）。位置與對帳一樣在所有事情之後，
         # 而且 `purge_old_logs` 保證不拋例外——清理不值得讓一天原本成功的
         # 執行以 traceback 收場。
-        purge_old_logs(logs_path)
+        # ⚠️ 路徑在**這裡**才解析，不放在參數預設值。預設值是 `def` 執行的
+        #    那一刻就綁死的，之後任何人都改不動它——包含測試。那正是
+        #    2026-08-23 發現「跑 pytest 會對正式的 logs/ 執行刪除」的原因。
+        purge_old_logs(logs_path if logs_path is not None else LOGS_PATH)
 
     return outcome
 
@@ -412,6 +420,7 @@ def _run_strategy(
     broker,
     notify,
     *,
+    now: clock,
     sleep=time.sleep,
     state_path: str,
     observations_path: str,
@@ -589,6 +598,30 @@ def _run_strategy(
         # 讀不懂就不知道帳上有沒有部位，這時候下單可能變成加倉或反向新倉。
         # 不確定的時候什麼都不做，比猜一個好。
         return failed(f"狀態檔異常，未下單：{state_error}")
+
+    # ⚠️ **時間關卡。** 排程設了「錯過就補跑」，而這個程式沒有時鐘——
+    #    停電或 Windows 強制更新重開之後，這一班會在電腦回來的那一刻觸發，
+    #    然後用市價把單送出去。訊號是對的（開盤價不會變），但那是另一筆交易。
+    #
+    #    最壞的情況不是價格差：拖到 13:40 之後才跑的話，出場那班早就看過
+    #    「今天沒有記錄」而靜默結束了，然後這裡開一個部位、寫下狀態檔，
+    #    **再也沒有東西會去平它**——部位直接進夜盤。
+    #
+    #    位置是刻意的：**在下單之前，在發報與觀測之後**。訊號是主要產出，
+    #    而觀測記錄是既成事實（開盤價確實長那樣），兩者都不該因為晚了而消失。
+    #
+    #    只在開關開著時才擋。關著的時候本來就不會送單，這時候再發一則
+    #    「太晚了沒下單」只是噪音——它描述的是一件不會發生的事。
+    if config.auto_order_enabled and now > config.entry_cutoff:
+        reason = (f"這班在 {now.strftime('%H:%M')} 才跑，"
+                  f"已過 {config.entry_cutoff.strftime('%H:%M')} 的界線，未下單")
+        logger.error("%s", reason)
+        _send(build_entry_too_late_payload(
+            result.signal, now, config.entry_cutoff, today))
+        return EntryOutcome(
+            signal=result.signal, opens=opens, notified=notified, exit_code=1,
+            failure=reason, contracts=contracts, is_settlement_day=settlement,
+        )
 
     try:
         _place_entry_order(
@@ -946,9 +979,14 @@ def main(argv=None) -> int:
         return 1
     config, broker, notify = runtime
 
-    today = date.today()
+    # 日期與時刻**一起取**，而且只取這一次。分兩次呼叫的話，跨午夜那一瞬間
+    # 會拿到互相矛盾的兩個值。時間在這個系統裡不做接縫（見 SPEC），
+    # 它從這裡當參數傳進流程，測試因此不需要凍結時鐘。
+    started = datetime.now()
+    today = started.date()
     if args.stage == "entry":
         outcome = run_entry(config, today=today, broker=broker, notify=notify,
+                            now=started.time(),
                             state_path=STATE_PATH,
                             observations_path=OBSERVATIONS_PATH)
         logger.info("進場結束：訊號=%s exit_code=%s", outcome.signal, outcome.exit_code)

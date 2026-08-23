@@ -19,6 +19,33 @@ import pytest
 from broker import BUY, ENTRY, FillUnknown, MTX_CODE, OrderFailed, OrderRequest
 from broker.capital import CapitalBroker
 
+# 正式的 logs/ 路徑，在 conftest 的 fixture 導開之前就先算好——
+# 直接 import housekeeping.LOGS_PATH 的話拿到的是已經被導開的值。
+import os as _os
+_REAL_LOGS_PATH = _os.path.join(
+    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "logs")
+
+def test_tests_never_default_to_the_real_logs_directory():
+    """跑測試不可以在正式的 `logs/` 裡留東西。
+
+    `logs/` 是真實交易的鑑識記錄。2026-08-23 發現裡面積了 46 個
+    `SEQ0000000001` 的假回覆檔——全是測試留下的，而且跑一次 pytest 就多一個。
+    它們與真的券商回覆混在同一個目錄、同樣的檔名格式，日後查帳時分不出來。
+
+    原因是 `CapitalBroker` 的存檔目錄預設指向 `housekeeping.LOGS_PATH`，
+    而測試建 broker 時沒有人覆寫它。守在這裡而不是各測試檔各自小心：
+    忘記覆寫是預設會發生的事，不是例外。
+    """
+    import housekeeping
+    broker = CapitalBroker("id", "pw", environment="test", account="F9990001234567")
+    assert broker._replies_dir != _REAL_LOGS_PATH, (
+        f"測試建出來的 broker 會把原始回覆寫進正式的 logs/（{broker._replies_dir}）"
+    )
+    assert housekeeping.LOGS_PATH != _REAL_LOGS_PATH, (
+        "housekeeping.LOGS_PATH 沒有被導開，purge_old_logs 之類的東西也會碰到真的目錄"
+    )
+
+
 REQUEST = OrderRequest(
     product=MTX_CODE, order_code="MTX08", contract_month="202608",
     side=BUY, lots=1, intent=ENTRY,

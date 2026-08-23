@@ -7,13 +7,20 @@
 這正是 SPEC 把 `broker` 定為 seam 的理由。
 """
 
-from datetime import date
+from datetime import date, time
 
 import pytest
 
 from broker import BUY, MTX_CODE, OpenPrices, SELL, TMF_CODE, TX_CODE
 from broker.fake import FakeBroker
-from conftest import CONTRACTS, RecordingNotifier, make_config, observations_path, state_path
+from conftest import (
+    CONTRACTS,
+    ON_TIME,
+    RecordingNotifier,
+    make_config,
+    observations_path,
+    state_path,
+)
 from main import run_entry
 from state import PositionRecord, read_position, write_position
 
@@ -32,7 +39,7 @@ def state_file(isolated_state_file):
     return isolated_state_file
 
 
-def _run(opens, cfg=None, broker=None, today=D):
+def _run(opens, cfg=None, broker=None, today=D, now=ON_TIME):
     broker = broker or FakeBroker(script=[opens], contracts=CONTRACTS)
     notifier = RecordingNotifier()
     outcome = run_entry(
@@ -44,8 +51,110 @@ def _run(opens, cfg=None, broker=None, today=D):
         state_path=state_path(),
         observations_path=observations_path(),
         fetch_official=lambda day: None,
+        now=now,
     )
     return outcome, notifier, broker
+
+
+# --- 時間關卡：太晚跑的那一班不下單 ---
+#
+# 排程設了「錯過就補跑」，而程式本身沒有時鐘。停電或 Windows 強制更新重開
+# 之後，進場那班會在電腦回來的**那一刻**觸發並用市價送單。
+#
+# ⚠️ 最壞的情況不是價格差。拖到 13:40 之後才跑的話，出場那班早就看過
+#    「今天沒有記錄」而靜默結束了，然後這裡開一個部位、寫下狀態檔，
+#    **再也沒有東西會去平它**——部位直接進夜盤。
+
+
+LATE = time(11, 3)          # 電腦中午才回來
+CUTOFF = time(9, 0)         # config 的預設界線
+
+
+def test_a_late_run_places_no_order():
+    """過了界線就一張單都不送。"""
+    _, _, broker = _run(LONG_OPENS, now=LATE)
+    assert broker.orders == [], f"太晚了還是送了 {len(broker.orders)} 張單"
+
+
+def test_a_late_run_leaves_no_position_record():
+    """沒下單就不可以留記錄——留了的話下午會去平一個不存在的部位，
+    而那筆反向委託是**開新倉**，不是平倉。
+    """
+    _run(LONG_OPENS, now=LATE)
+    assert read_position(path=state_path()) is None
+
+
+def test_a_late_run_still_publishes_the_signal():
+    """訊號是這個系統的主要產出，不因為沒下單而不發。
+
+    開盤價不會因為晚了三小時就改變，所以訊號本身仍然是正確的——
+    使用者拿得到它，要不要自己手動進場是他的判斷。
+    """
+    _, notifier, _ = _run(LONG_OPENS, now=LATE)
+    assert "做多" in notifier.text
+
+
+def test_a_late_run_still_records_the_observation():
+    """觀測記錄是既成事實——開盤價確實長那樣，與晚不晚無關。
+
+    ticket 07 的規則是「**每個交易日都要留下一筆**」，因為隔日對帳唯一的
+    依據就是它。漏一天，那天有沒有取錯盤別就永遠查不出來了。
+    """
+    import json
+    _run(LONG_OPENS, now=LATE)
+    with open(observations_path(), encoding="utf-8") as fh:
+        rows = [json.loads(line) for line in fh if line.strip()]
+    assert len(rows) == 1, "太晚跑的那天沒有留下觀測記錄"
+    assert rows[0]["signal"] == "LONG"
+
+
+def test_a_late_run_says_there_is_no_position_to_worry_about():
+    """這則訊息與「下單失敗」刻意不同。
+
+    下單失敗的正確反應是「去看帳戶」（可能有事），
+    這一則是「**帳上什麼都沒有**」——確定沒送出任何東西。
+    講錯的話使用者會白跑一趟券商 APP，而下次真的出事時就不會認真看。
+    """
+    _, notifier, _ = _run(LONG_OPENS, now=LATE)
+    assert "11:03" in notifier.text, "沒講實際幾點跑的，使用者不知道排程慢了多久"
+    assert "09:00" in notifier.text, "沒講界線在哪，使用者不知道要調什麼"
+    assert "沒有部位" in notifier.text
+    assert "🚨 下單失敗" not in notifier.text
+
+
+def test_a_late_run_ends_with_a_non_zero_code():
+    """排程慢到過了界線不是預期內的一天，要留下痕跡。"""
+    outcome, _, _ = _run(LONG_OPENS, now=LATE)
+    assert outcome.exit_code != 0
+
+
+def test_the_cutoff_itself_is_still_in_time():
+    """界線那一刻仍然算準時——「到 09:00 為止」而不是「不到 09:00」。
+
+    邊界寫反的代價不對稱：早一分鐘擋掉是白白少做一天，
+    晚一分鐘放行只是多一分鐘的偏差。但更重要的是**規則要講得清楚**。
+    """
+    _, _, broker = _run(LONG_OPENS, now=CUTOFF)
+    assert len(broker.orders) == 1
+
+
+def test_a_late_run_with_ordering_switched_off_says_nothing_extra():
+    """開關關著時不發「太晚了」——它描述的是一件本來就不會發生的事。
+
+    關著的日子本來就不下單，這時候再發一則警告只是噪音。而噪音的代價是
+    真的：使用者習慣忽略某一類訊息之後，那類訊息就再也擋不住事情了。
+    """
+    _, notifier, broker = _run(LONG_OPENS, cfg=make_config(auto_order_enabled=False),
+                               now=LATE)
+    assert broker.orders == []
+    assert "太晚" not in notifier.text
+    assert "做多" in notifier.text, "訊號還是要發"
+
+
+def test_a_run_before_the_cutoff_orders_as_usual():
+    """對照組：界線之前一切照舊。"""
+    _, _, broker = _run(LONG_OPENS, now=time(8, 59))
+    assert len(broker.orders) == 1
 
 
 # --- 開關開啟：依訊號方向送單 ---
@@ -490,6 +599,7 @@ def test_a_repeat_run_with_discord_off_does_not_claim_it_notified(state_file):
         notify=RecordingNotifier(), sleep=lambda _s: None,
         state_path=str(state_file), observations_path=observations_path(),
         fetch_official=lambda day: None,
+        now=ON_TIME,
     )
     assert outcome.notified is False, "Discord 關著就沒有通知，不可以宣稱有"
     assert outcome.exit_code == 1, "但仍然要以錯誤結束——那個部位還沒人管"
@@ -513,5 +623,6 @@ def test_a_repeat_run_with_discord_on_does_report_it_notified():
         notify=RecordingNotifier(), sleep=lambda _s: None,
         state_path=state_path(), observations_path=observations_path(),
         fetch_official=lambda day: None,
+        now=ON_TIME,
     )
     assert outcome.notified is True

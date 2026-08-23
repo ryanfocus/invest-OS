@@ -22,7 +22,14 @@ import pytest
 
 from broker import BUY, FillUnknown, MTX_CODE, OpenPrices, SELL
 from broker.fake import FakeBroker
-from conftest import CONTRACTS, RecordingNotifier, make_config, observations_path, state_path
+from conftest import (
+    CONTRACTS,
+    ON_TIME,
+    RecordingNotifier,
+    make_config,
+    observations_path,
+    state_path,
+)
 from main import run_entry, run_exit
 from state import CONFIRMED, UNCERTAIN, PositionRecord, read_position, write_position, UNCERTAIN_ENTRY
 
@@ -43,6 +50,7 @@ def _entry(*, query_result, lots=2, **kw):
         today=D, broker=broker, notify=notifier, sleep=lambda _s: None,
         state_path=state_path(), observations_path=observations_path(),
         fetch_official=lambda day: None,
+        now=ON_TIME,
     )
     return outcome, notifier, broker
 
@@ -156,6 +164,7 @@ def test_a_successful_order_never_queries():
     broker = FakeBroker(script=[OPENS], contracts=CONTRACTS)
     run_entry(
         make_config(auto_order_enabled=True), today=D, broker=broker,
+        now=ON_TIME,
         notify=RecordingNotifier(), sleep=lambda _s: None,
         state_path=state_path(), observations_path=observations_path(),
         fetch_official=lambda day: None,
@@ -379,6 +388,7 @@ def test_the_order_is_recorded_before_the_query_is_attempted():
     )
     run_entry(
         make_config(auto_order_enabled=True), today=D, broker=broker,
+        now=ON_TIME,
         notify=RecordingNotifier(), sleep=lambda _s: None,
         state_path=state_path(), observations_path=observations_path(),
         fetch_official=lambda day: None,
@@ -396,6 +406,7 @@ def test_an_exploding_query_still_lets_the_afternoon_ask_for_help():
     )
     run_entry(
         make_config(auto_order_enabled=True), today=D, broker=broker,
+        now=ON_TIME,
         notify=RecordingNotifier(), sleep=lambda _s: None,
         state_path=state_path(), observations_path=observations_path(),
         fetch_official=lambda day: None,
@@ -425,6 +436,7 @@ def test_rerunning_the_entry_stage_does_not_misdescribe_an_uncertain_exit():
     notifier = RecordingNotifier()
     run_entry(
         make_config(auto_order_enabled=True), today=D, broker=broker,
+        now=ON_TIME,
         notify=notifier, sleep=lambda _s: None,
         state_path=state_path(), observations_path=observations_path(),
         fetch_official=lambda day: None,
@@ -444,6 +456,7 @@ def test_rerunning_the_entry_stage_still_flags_an_uncertain_entry():
     notifier = RecordingNotifier()
     run_entry(
         make_config(auto_order_enabled=True), today=D, broker=broker,
+        now=ON_TIME,
         notify=notifier, sleep=lambda _s: None,
         state_path=state_path(), observations_path=observations_path(),
         fetch_official=lambda day: None,

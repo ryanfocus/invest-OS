@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date
+import tempfile
+from datetime import date, datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -46,12 +47,21 @@ def main() -> int:
             return False
         return send(payload, webhook)
 
-    outcome = run_entry(
-        settings.load(),
-        today=date.today(),
-        broker=FakeBroker(tx=tx, mtx=mtx, tmf=tmf),
-        notify=notify,
-    )
+    # ⚠️ 狀態檔與觀測記錄寫到暫存目錄。這支是示範，不可以動到正式的
+    #    `state/`——那裡面是重建不回來的稽核歷史，而它跑的是假開盤價。
+    with tempfile.TemporaryDirectory() as scratch:
+        outcome = run_entry(
+            settings.load(),
+            today=date.today(),
+            broker=FakeBroker(tx=tx, mtx=mtx, tmf=tmf),
+            notify=notify,
+            # 示範永遠算「準時」：它要展示的是發報那條鏈，不是時間關卡。
+            now=datetime.now().time(),
+            state_path=os.path.join(scratch, "position.json"),
+            observations_path=os.path.join(scratch, "observations.jsonl"),
+            logs_path=scratch,
+            fetch_official=lambda day: None,
+        )
 
     print(f"訊號：{outcome.signal}")
     print("-" * 40)

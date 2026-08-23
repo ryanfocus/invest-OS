@@ -21,7 +21,14 @@ import pytest
 
 from broker import MTX_CODE, OpenPrices, OrderFailed, TMF_CODE, TX_CODE
 from broker.fake import FakeBroker
-from conftest import CONTRACTS, RecordingNotifier, make_config, observations_path, state_path
+from conftest import (
+    CONTRACTS,
+    ON_TIME,
+    RecordingNotifier,
+    make_config,
+    observations_path,
+    state_path,
+)
 from main import run_entry
 from observations import Observation, read_observation_before
 from strategy import LONG, NO_TRADE
@@ -48,6 +55,7 @@ def _run(*, opens=LONG_OPENS, cfg=None, broker=None, today=D, fetch_official=Non
         state_path=state_path(),
         observations_path=observations_path(),
         fetch_official=fetch_official or (lambda day: None),
+        now=ON_TIME,
     )
     return outcome, notifier
 
@@ -201,6 +209,7 @@ def test_a_failed_observation_write_does_not_stop_the_signal(tmp_path):
         state_path=state_path(),
         observations_path=str(blocked / "observations.jsonl"),
         fetch_official=lambda day: None,
+        now=ON_TIME,
     )
     assert outcome.signal == LONG
     assert notifier.sent != []
@@ -220,6 +229,7 @@ def test_a_failed_observation_write_does_not_stop_the_order(tmp_path):
         state_path=state_path(),
         observations_path=str(blocked / "observations.jsonl"),
         fetch_official=lambda day: None,
+        now=ON_TIME,
     )
     assert len(broker.orders) == 1
 
@@ -318,6 +328,7 @@ def test_old_logs_are_purged_at_the_end_of_the_morning_run(tmp_path):
 
     run_entry(
         make_config(), today=D,
+        now=ON_TIME,
         broker=FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS),
         notify=RecordingNotifier(), sleep=lambda _s: None,
         state_path=state_path(), observations_path=observations_path(),
@@ -340,6 +351,7 @@ def test_a_non_trading_day_does_not_bother_purging(tmp_path):
 
     run_entry(
         make_config(), today=WEEKEND,
+        now=ON_TIME,
         broker=FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS),
         notify=RecordingNotifier(), sleep=lambda _s: None,
         state_path=state_path(), observations_path=observations_path(),

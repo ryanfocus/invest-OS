@@ -48,6 +48,12 @@ class Config:
     order_lots: int
     # 送出委託後等成交回報的秒數。逾時 → 記為「不確定」並要求人工確認。
     order_fill_timeout_seconds: int
+    # 進場的時間界線。過了它就**不下單**（訊號與觀測照常）。
+    # 排程設了「錯過就補跑」，而程式本身沒有時鐘——停電或強制更新重開之後，
+    # 進場那班會在電腦回來的那一刻觸發並用市價送單。最壞的情況是它拖到
+    # 13:40 之後才跑：出場那班早就看過「沒有記錄」而靜默結束了，
+    # 然後這裡開一個部位、寫下狀態檔，**再也沒有東西會去平它**。
+    entry_cutoff: datetime.time
     # 群益連線環境。沒有預設值是刻意的——猜錯就是把測試單送到正式環境。
     capital_environment: str
     # 臨時休市（颱風假）與臨時開市（補班日）。holidays 套件不知道這兩種。
@@ -99,6 +105,11 @@ class Config:
             raise ValueError(
                 f"order.fill_timeout_seconds 必須 ≥ 1，"
                 f"目前是 {self.order_fill_timeout_seconds}"
+            )
+        if not isinstance(self.entry_cutoff, datetime.time):
+            raise ValueError(
+                f"order.entry_cutoff 必須是 datetime.time，目前是 "
+                f"{self.entry_cutoff!r}（型別 {type(self.entry_cutoff).__name__}）"
             )
         if self.order_product not in PRODUCT_CODES:
             raise ValueError(
@@ -182,6 +193,36 @@ def _parse_dates(values, where: str = "") -> frozenset:
     return frozenset(parsed)
 
 
+def _parse_clock(value, where: str) -> datetime.time:
+    """把 `"09:00"` 解析成 `datetime.time`。
+
+    ⚠️ **YAML 對時間有個會咬人的陷阱：`9:00` 不是字串，是整數 540。**
+       YAML 1.1 把 `分:秒` 當成六十進位數字，而**有沒有前導零決定了型別**——
+       `09:00` 是字串、`9:00` 是 540。使用者手改設定時很容易寫掉那個零，
+       而 540 不會在載入時出錯，只會讓時間關卡變成一個看不懂的東西。
+       所以這裡收到數字時要指名道姓地講出原因。
+    """
+    if isinstance(value, bool) or isinstance(value, (int, float)):
+        raise ValueError(
+            f"{where} 讀到數字 {value!r} 而不是時間。"
+            "YAML 把 `9:00` 當成六十進位數字（= 540），要加前導零或用引號："
+            f'寫成 "09:00"'
+        )
+    if isinstance(value, datetime.time):
+        return value
+    if not isinstance(value, str):
+        raise ValueError(
+            f"{where} 必須是 HH:MM 格式的字串，目前是 {value!r}"
+            f"（型別 {type(value).__name__}）"
+        )
+    try:
+        hour, _, minute = value.strip().partition(":")
+        parsed = datetime.time(int(hour), int(minute))
+    except (TypeError, ValueError):
+        raise ValueError(f"{where} 看不懂：{value!r}，要的是 HH:MM，例如 \"09:00\"") from None
+    return parsed
+
+
 def build(raw) -> Config:
     """從原始 mapping 組出 Config。缺 key 會拋 KeyError，不靜默補預設值。"""
     return Config(
@@ -192,6 +233,7 @@ def build(raw) -> Config:
         order_product=raw["order"]["product"],
         order_lots=raw["order"]["lots"],
         order_fill_timeout_seconds=raw["order"]["fill_timeout_seconds"],
+        entry_cutoff=_parse_clock(raw["order"]["entry_cutoff"], "order.entry_cutoff"),
         capital_environment=raw["capital"]["environment"],
         calendar_extra_closures=_parse_dates(raw["calendar"]["extra_closures"], "calendar.extra_closures"),
         calendar_extra_openings=_parse_dates(raw["calendar"]["extra_openings"], "calendar.extra_openings"),

@@ -8,7 +8,14 @@ from datetime import date
 
 from broker import MTX_CODE, OpenPrices, Quote, TMF_CODE, TX_CODE
 from broker.fake import FakeBroker
-from conftest import CONTRACTS, RecordingNotifier, make_config, observations_path, state_path
+from conftest import (
+    CONTRACTS,
+    ON_TIME,
+    RecordingNotifier,
+    make_config,
+    observations_path,
+    state_path,
+)
 from main import run_entry
 from strategy import LONG
 
@@ -32,6 +39,7 @@ def _run(today, cfg=None, broker=None):
         state_path=state_path(),
         observations_path=observations_path(),
         fetch_official=lambda day: None,
+        now=ON_TIME,
     )
     return outcome, notifier, broker
 

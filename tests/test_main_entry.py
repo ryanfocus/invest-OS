@@ -6,7 +6,7 @@
 
 from datetime import date
 
-from conftest import RecordingNotifier, make_config, observations_path, state_path
+from conftest import ON_TIME, RecordingNotifier, make_config, observations_path, state_path
 from broker.fake import FakeBroker
 from main import run_entry
 from strategy import LONG, NO_TRADE, SHORT
@@ -24,6 +24,7 @@ def _run(tx, mtx, tmf, cfg=None, notifier=None):
         state_path=state_path(),
         observations_path=observations_path(),
         fetch_official=lambda day: None,
+        now=ON_TIME,
     )
     return outcome, notifier
 

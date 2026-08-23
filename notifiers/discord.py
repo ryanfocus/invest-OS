@@ -70,6 +70,29 @@ def build_order_failed_payload(reason: str, trading_date: date) -> dict:
     return {"content": "\n".join(lines)}
 
 
+def build_entry_too_late_payload(signal: str, ran_at, cutoff, trading_date: date) -> dict:
+    """**這班太晚了，所以沒有下單。** 純函式，無 I/O。
+
+    與「下單失敗」刻意分成兩則：那一則的意思是「單可能出了問題，去看帳戶」，
+    這一則是「**確定什麼都沒送**，帳上乾淨」。講混了的代價是使用者白跑一趟
+    券商 APP——而白跑幾次之後，真的出事那一則他就不會認真看了。
+
+    訊息裡放實際執行時刻與界線兩個數字，因為使用者要做的判斷是
+    「排程慢了多久、要不要調界線」，那兩個數字缺一個都判斷不了。
+    """
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "⏰ **這班太晚了，沒有下單**",
+        "",
+        f"訊號：{_SIGNAL_TEXT.get(signal, signal)}",
+        f"實際執行 {ran_at.strftime('%H:%M')}，已過 {cutoff.strftime('%H:%M')} 的界線。",
+        "",
+        "**帳上沒有部位**——什麼都沒有送出去，下午也沒有東西要平。",
+        "排程大概是因為關機或重開機而補跑的，確認一下電腦有沒有意外重啟。",
+    ]
+    return {"content": "\n".join(lines)}
+
+
 def build_fill_unknown_payload(record, reason: str, trading_date: date) -> dict:
     """**委託送出去了，但不知道成交幾口。** 純函式，無 I/O。
 

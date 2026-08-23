@@ -1,5 +1,6 @@
 import os
 import sys
+from datetime import time
 
 import pytest
 
@@ -42,6 +43,35 @@ def isolated_state_file(tmp_path):
     _observations_path = ""
 
 
+@pytest.fixture(autouse=True)
+def logs_never_touch_the_real_directory(tmp_path_factory, monkeypatch):
+    """**測試絕不碰正式的 `logs/`。**
+
+    那個目錄是真實交易的鑑識記錄：券商的原始回覆、群益元件自己寫的日誌。
+    2026-08-23 發現測試同時在做兩件事——
+
+      寫：`CapitalBroker` 的原始回覆存檔預設就指向那裡，累積了 46 個
+          `SEQ0000000001` 的假檔案，和真的回覆混在同一個檔名格式裡
+      刪：`run_entry` 的 `logs_path` 沒傳時會對那裡跑 `purge_old_logs`
+
+    刪的範圍剛好與正式環境相同（30 天）所以沒有造成實害，但那是巧合——
+    任何人把保留天數調小來測一下，就會清掉真的交易記錄。
+
+    導開的是**兩個** `LOGS_PATH`：`housekeeping` 的（broker 在執行期查它）
+    與 `main` 的（`from ... import` 複製了一份，改前者不會動到後者）。
+    """
+    import housekeeping
+    import main as main_module
+
+    # ⚠️ **不放在 `tmp_path` 底下。** 有測試會斷言 `tmp_path` 裡有哪些東西
+    #    （狀態檔沒留下暫存檔、清理只碰指定目錄），多一個 `logs/` 就會讓
+    #    它們無緣無故變紅——而紅的原因與它們要守的事情完全無關。
+    logs = tmp_path_factory.mktemp("logs")
+    monkeypatch.setattr(housekeeping, "LOGS_PATH", str(logs))
+    monkeypatch.setattr(main_module, "LOGS_PATH", str(logs))
+    return logs
+
+
 def state_path() -> str:
     """本次測試專用的狀態檔路徑。"""
     return _state_path
@@ -70,6 +100,11 @@ class RecordingNotifier:
         return "\n".join(p["content"] for p in self.sent)
 
 
+# 進場那班準時執行的時刻。測試傳這個等於說「這天一切正常」，
+# 而想測時間關卡的就自己寫明幾點——「哪些測試在乎時間」因此在測試碼裡看得見。
+ON_TIME = time(8, 50)
+
+
 def make_config(**overrides) -> settings_module.Config:
     """組一份測試用設定。預設值與 config/settings.yaml 一致。
 
@@ -86,6 +121,7 @@ def make_config(**overrides) -> settings_module.Config:
         "order_product": "MTX00AM",
         "order_lots": 1,
         "order_fill_timeout_seconds": 10,
+        "entry_cutoff": time(9, 0),
         "capital_environment": "test",
         "calendar_extra_closures": frozenset(),
         "calendar_extra_openings": frozenset(),
