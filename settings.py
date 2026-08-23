@@ -202,7 +202,12 @@ def _parse_clock(value, where: str) -> datetime.time:
        而 540 不會在載入時出錯，只會讓時間關卡變成一個看不懂的東西。
        所以這裡收到數字時要指名道姓地講出原因。
     """
-    if isinstance(value, bool) or isinstance(value, (int, float)):
+    if isinstance(value, bool):
+        # YAML 的 `yes` / `on` / `true` 都是 bool。與下面那個數字的判斷分開，
+        # 因為原因完全不同——講六十進位對這裡是答非所問。
+        # ⚠️ 順序也不能反：`bool` 是 `int` 的子類，先判斷數字的話這一段永遠到不了。
+        raise ValueError(f'{where} 讀到 {value!r}，要的是時間，例如 "09:00"')
+    if isinstance(value, (int, float)):
         raise ValueError(
             f"{where} 讀到數字 {value!r} 而不是時間。"
             "YAML 把 `9:00` 當成六十進位數字（= 540），要加前導零或用引號："

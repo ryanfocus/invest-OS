@@ -5,6 +5,8 @@ invest-hm 踩過的教訓：settings.yaml 加了 key 但程式沒讀，或程式
 沒有一份需要人工同步的 key 清單。
 """
 
+import datetime
+
 import pytest
 
 import settings as settings_module
@@ -179,6 +181,64 @@ def test_unknown_product_is_rejected_at_load_time():
     """打錯商品代碼會下到別的東西上——這是必須在載入時就攔下的錯誤。"""
     with pytest.raises(ValueError, match="product"):
         _config(order_product="TX00")     # 少了 AM，是全盤代碼
+
+
+# --- 進場界線：YAML 的六十進位陷阱 ---
+
+
+def test_the_shipped_cutoff_is_a_real_time_not_a_number():
+    """**出貨的設定必須真的是時間。**
+
+    這條守的是 repo 的狀態，不是程式邏輯：`entry_cutoff` 只要寫成
+    `9:00`（少一個前導零），YAML 就會把它當成六十進位數字交出 540——
+    載入不會出錯，關卡卻變成拿時間跟一個整數比大小。
+    """
+    cutoff = settings_module.load().entry_cutoff
+    assert isinstance(cutoff, datetime.time), f"讀到的是 {cutoff!r}"
+    assert cutoff == datetime.time(9, 0)
+
+
+def test_a_cutoff_without_a_leading_zero_is_rejected_with_the_reason():
+    """**`9:00` 在 YAML 裡是整數 540，不是時間。**
+
+    這是整個 `_parse_clock` 存在的理由。YAML 1.1 把 `分:秒` 當成六十進位，
+    而**有沒有前導零決定了型別**——`09:00` 是字串、`9:00` 是 540。
+    使用者手改設定時很容易寫掉那個零。
+
+    錯誤訊息必須指名道姓講出原因：只說「型別不對」的話，使用者會盯著
+    一個看起來完全正常的 `9:00` 找不出哪裡錯。
+    """
+    import yaml
+    assert yaml.safe_load("entry_cutoff: 9:00")["entry_cutoff"] == 540, (
+        "PyYAML 的行為變了，這條測試守的前提不成立了"
+    )
+    with pytest.raises(ValueError, match="六十進位") as exc:
+        settings_module._parse_clock(540, "order.entry_cutoff")
+    assert "09:00" in str(exc.value), "沒有告訴使用者正確寫法"
+
+
+def test_a_yaml_boolean_cutoff_does_not_get_the_sexagesimal_lecture():
+    """`entry_cutoff: yes` 是 bool，講六十進位是答非所問。
+
+    ⚠️ `bool` 是 `int` 的子類，所以判斷順序反了的話這個分支永遠到不了，
+       使用者會拿到一段跟他的輸入毫無關係的說明。
+    """
+    with pytest.raises(ValueError) as exc:
+        settings_module._parse_clock(True, "order.entry_cutoff")
+    assert "六十進位" not in str(exc.value)
+
+
+def test_a_malformed_cutoff_is_rejected_at_load_time():
+    """看不懂的字串要在載入時就炸，不可以拖到 08:50 才變成看不懂的錯誤。"""
+    for bad in ("09", "abc", "9點", "", "25:00", "09:99"):
+        with pytest.raises(ValueError, match="entry_cutoff"):
+            settings_module._parse_clock(bad, "order.entry_cutoff")
+
+
+def test_a_config_built_with_a_non_time_cutoff_is_rejected():
+    """繞過 `_parse_clock` 直接建 Config 也擋——測試就是這樣建的。"""
+    with pytest.raises(ValueError, match="entry_cutoff"):
+        _config(entry_cutoff="09:00")
 
 
 def test_a_quoted_false_does_not_arm_the_switch():

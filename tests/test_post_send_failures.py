@@ -20,30 +20,48 @@ from broker import BUY, ENTRY, FillUnknown, MTX_CODE, OrderFailed, OrderRequest
 from broker.capital import CapitalBroker
 
 # 正式的 logs/ 路徑，在 conftest 的 fixture 導開之前就先算好——
-# 直接 import housekeeping.LOGS_PATH 的話拿到的是已經被導開的值。
-import os as _os
-_REAL_LOGS_PATH = _os.path.join(
-    _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "logs")
+# 直接讀 housekeeping.LOGS_PATH 的話拿到的是已經被導開的值。
+_REAL_LOGS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
 
-def test_tests_never_default_to_the_real_logs_directory():
-    """跑測試不可以在正式的 `logs/` 裡留東西。
+def test_saving_a_reply_never_touches_the_real_logs_directory():
+    """存下原始回覆這個動作，**絕不可以碰到正式的 `logs/`**。
 
-    `logs/` 是真實交易的鑑識記錄。2026-08-23 發現裡面積了 46 個
-    `SEQ0000000001` 的假回覆檔——全是測試留下的，而且跑一次 pytest 就多一個。
-    它們與真的券商回覆混在同一個目錄、同樣的檔名格式，日後查帳時分不出來。
+    那個目錄是真實交易的鑑識記錄。2026-08-23 發現裡面積了 47 個
+    `SEQ0000000001` 的假回覆檔——全是測試留下的，跑一次 pytest 就多一個，
+    而且與真的券商回覆同一種檔名格式，肉眼分不出來。
 
-    原因是 `CapitalBroker` 的存檔目錄預設指向 `housekeeping.LOGS_PATH`，
-    而測試建 broker 時沒有人覆寫它。守在這裡而不是各測試檔各自小心：
-    忘記覆寫是預設會發生的事，不是例外。
+    ⚠️ 這條同時斷言**存檔真的發生了**。少了那一半，`_save_raw_replies`
+       哪天不再存檔、或這個測試沒走到存檔那條路，它都會靜靜地一直綠——
+       一條永遠不會紅的測試比沒有測試更糟。
     """
+    filled_row = [""] * 49
+    filled_row[0] = filled_row[47] = "SEQ0000000001"
+    filled_row[1], filled_row[2] = "TF", "N"
+    filled_row[3], filled_row[20] = "Y", "1"
+
+    def _listing(directory):
+        return set(os.listdir(directory)) if os.path.isdir(directory) else set()
+
+    before = _listing(_REAL_LOGS_PATH)
+
+    broker = None
+
+    def _reply_arrives(predicate, seconds):
+        broker._reply_events.rows.append(",".join(filled_row))
+        return predicate()
+
+    broker = _broker(on_wait=_reply_arrives)
+    broker._reply_events.rows = []
+    with pytest.raises(OrderFailed):
+        broker.place_order(REQUEST)
+
+    assert _listing(_REAL_LOGS_PATH) == before, (
+        f"測試在正式的 logs/ 留下了 {_listing(_REAL_LOGS_PATH) - before}"
+    )
     import housekeeping
-    broker = CapitalBroker("id", "pw", environment="test", account="F9990001234567")
-    assert broker._replies_dir != _REAL_LOGS_PATH, (
-        f"測試建出來的 broker 會把原始回覆寫進正式的 logs/（{broker._replies_dir}）"
-    )
-    assert housekeeping.LOGS_PATH != _REAL_LOGS_PATH, (
-        "housekeeping.LOGS_PATH 沒有被導開，purge_old_logs 之類的東西也會碰到真的目錄"
-    )
+    saved = [f for f in _listing(housekeeping.LOGS_PATH) if f.startswith("replies-")]
+    assert saved, "根本沒有存檔——這條測試沒有走到它要守的那條路"
 
 
 REQUEST = OrderRequest(

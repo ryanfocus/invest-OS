@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from datetime import date, datetime
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -50,13 +50,16 @@ def main() -> int:
     # ⚠️ 狀態檔與觀測記錄寫到暫存目錄。這支是示範，不可以動到正式的
     #    `state/`——那裡面是重建不回來的稽核歷史，而它跑的是假開盤價。
     with tempfile.TemporaryDirectory() as scratch:
+        config = settings.load()
         outcome = run_entry(
-            settings.load(),
+            config,
             today=date.today(),
             broker=FakeBroker(tx=tx, mtx=mtx, tmf=tmf),
             notify=notify,
-            # 示範永遠算「準時」：它要展示的是發報那條鏈，不是時間關卡。
-            now=datetime.now().time(),
+            # 界線那一刻算準時，所以傳它就是**永遠準時**。
+            # 傳真正的現在時刻的話，這支在 09:00 之後跑會撞上時間關卡——
+            # 而它要展示的是發報那條鏈，不是關卡。
+            now=config.entry_cutoff,
             state_path=os.path.join(scratch, "position.json"),
             observations_path=os.path.join(scratch, "observations.jsonl"),
             logs_path=scratch,
