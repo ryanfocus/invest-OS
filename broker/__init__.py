@@ -17,6 +17,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # 只給型別檢查器看。`broker` 不在執行期依賴 `state`——方向必須是
+    # 上層依賴下層，反過來會讓假 broker 也得認識狀態檔。
+    from state import PositionRecord
 
 # 報價訂閱用的近月連續代碼。
 #
@@ -72,12 +78,22 @@ class FillUnknown(BrokerError):
     `order_seq` 與 `known_filled` 帶著給人用：委託序號讓使用者能在券商 APP
     直接查到那一筆，已知成交口數告訴他對帳時**至少**要看到幾口。
     只有一句錯誤訊息的話，他得自己從幾百筆委託裡找。
+
+    `record` 是**呼叫端掛上去的**，不是 broker 填的：broker 不知道狀態檔長什麼樣。
+    進場那段在寫完狀態檔之後把記錄掛在例外上帶出去（見 `main._place_entry_order`），
+    這樣通知那一段就不必在 except 區段裡重新讀檔——那次讀本身可能再拋一個例外，
+    於是整個例外逃出 `run_entry` 而一則通知都不發。
+
+    宣告在這裡是因為**有人依賴它**（`main.py` 讀 `exc.record` 去組訊息）。
+    靠動態賦值的話，那個依賴不在任何一處介面上，改壞了也沒有東西會講。
     """
 
-    def __init__(self, message: str, *, order_seq: str = "", known_filled: int = 0):
+    def __init__(self, message: str, *, order_seq: str = "", known_filled: int = 0,
+                 record: PositionRecord | None = None):
         super().__init__(message)
         self.order_seq = order_seq
         self.known_filled = known_filled
+        self.record = record
 
 
 # 委託買賣別。刻意不用群益的 0/1：那兩個數字在程式碼裡看不出誰是誰，

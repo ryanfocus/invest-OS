@@ -133,6 +133,12 @@ def _fetch_open_prices(broker, attempts: int, interval: int, sleep, trading_day:
             logger.warning("第 %d/%d 次取開盤價未就緒：%s", attempt, attempts, exc)
             if attempt < attempts:
                 sleep(interval)
+    if last_error is None:
+        # attempts < 1 才會走到這裡。`settings.py` 驗過它 ≥ 1，所以正式流程
+        # 到不了——但這個函式的參數不帶那個前提，直接呼叫時傳 0 的話，
+        # 原本會變成 `raise None`（TypeError: exceptions must derive from
+        # BaseException），完全看不出真正的原因。
+        raise QuoteNotReady(f"重試次數是 {attempts}，一次都沒有嘗試取報價")
     raise last_error
 
 
