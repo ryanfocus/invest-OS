@@ -12,6 +12,7 @@
 而那時候失敗的代價是部位過夜。
 """
 
+import io
 from dataclasses import replace
 from datetime import date
 
@@ -44,8 +45,13 @@ def _record(**overrides) -> PositionRecord:
     return PositionRecord(**base)
 
 
-def _run(record=None, cfg=None, broker=None, today=D, fills=None, order_error=None):
-    if record is not None:
+def _run(record=None, cfg=None, broker=None, today=D, fills=None, order_error=None,
+         raw_state=None):
+    if raw_state is not None:
+        # 讀不懂的狀態檔只能用寫壞的檔案做出來——`write_position` 會擋下
+        # 所有違反不變量的記錄，正是它擋不住的東西（截斷、亂碼）才是這條路。
+        io.open(state_path(), 'w', encoding='utf-8').write(raw_state)
+    elif record is not None:
         write_position(record, path=state_path())
     broker = broker or FakeBroker(fills=fills, order_error=order_error)
     notifier = RecordingNotifier()
@@ -504,12 +510,54 @@ def test_an_old_format_state_file_alerts_instead_of_crashing(tmp_path):
     assert outcome.exit_code == 1
 
 
+# --- 「收不到回報」那則訊息裡的口數 ---
+
+
+def test_the_unknown_exit_message_reports_the_lots_actually_sent():
+    """出場單送的是**早上實際成交**的口數，訊息就要印那個數字。
+
+    早上委託 3 口只成交 2 口 → 下午送 2 口。這則訊息的用途是叫人
+    「先確認帳戶實際部位再決定要不要補單」，印成 3 的話，人會拿著
+    多出來的 1 口去補一筆錯的單——那是開新倉，不是平倉。
+    """
+    from broker import FillUnknown
+    _, notifier, broker = _run(
+        _record(lots=2, requested_lots=3),
+        broker=FakeBroker(order_error=FillUnknown("逾時", order_seq="S")),
+    )
+    text = notifier.sent[0]["content"]
+    # 與 test_discord.py 那條的分工：那一條問「訊息本身印對了嗎」，
+    # 這一條問「**送到訊息裡的是不是同一筆委託**」——把 replace 之後
+    # （口數已被抹掉）的記錄交給訊息，只有從流程打進來才看得出來。
+    sent_lots = broker.orders[0].lots
+    assert sent_lots == 2, "出場單送的是早上實際成交的 2 口"
+    assert f"{sent_lots} 口" in text, f"訊息裡的口數與實際送出的不符：{text}"
+    assert "3 口" not in text, f"3 口是早上的委託量，不是下午送出去的：{text}"
+
+
+def test_the_unknown_exit_message_never_prints_a_placeholder_for_missing_lots():
+    """重跑時狀態檔裡沒有口數——那就明講，不可以印出 `None`。
+
+    記成「不確定」的那一刻，`PositionRecord` 的規定就把口數抹掉了
+    （`UNCERTAIN ⇒ lots is None`）。所以這則訊息第一次發有數字、
+    重跑就沒有。印 `None` 會讓一則「請去對帳」的訊息看起來像故障，
+    而使用者手上唯一的數字其實在第一次那則通知裡。
+    """
+    from state import UNCERTAIN_EXIT
+    _, notifier, broker = _run(
+        _record(lots=None, status=UNCERTAIN, uncertain_stage=UNCERTAIN_EXIT))
+    text = notifier.sent[0]["content"]
+    assert "None" not in text, f"訊息裡印出了 None：\n{text}"
+    assert "第一次" in text, "沒有告訴使用者去哪裡找那個數字"
+    assert broker.orders == [], "不確定的出場單絕不可以再送一次"
+
+
 # ─────────────────────────────────────────────────────────
 # 出場那班的結局規則：**有東西要講 ⟺ 非零結束碼**
 # ─────────────────────────────────────────────────────────
 #
-# 12 個出口全部滿足這條規則，但 2026-08-23 架構檢視之前，
-# 它在程式裡**沒有任何一處代表它**——被重新宣告了 12 次。
+# 15 個出口全部滿足這條規則，但 2026-08-23 架構檢視之前，
+# 它在程式裡**沒有任何一處代表它**——`ExitOutcome` 被直接建了 12 次。
 # commit b6187c0／fd4bd04 兩次改動落在這裡不是巧合。
 #
 # ⚠️ 精確一點：不變量是「**有東西要講**」而不是「講成功了」。
@@ -523,39 +571,55 @@ def _exit_scenarios():
     from state import UNCERTAIN_EXIT
     settle = dict(trading_day=20260819, last_trading_day=20260819)
     return [
-        ("非交易日",        dict(record=_record(), today=date(2026, 8, 16)), {}),
-        ("今日無記錄",      dict(record=None), {}),
-        ("已出場",          dict(record=_record(exited=True, close_reason="EXIT")), {}),
-        ("結算日正常",      dict(record=_record(**settle), today=SETTLEMENT), {}),
+        ("非交易日",        dict(record=_record(), today=date(2026, 8, 16))),
+        ("今日無記錄",      dict(record=None)),
+        ("已出場",          dict(record=_record(exited=True, close_reason="EXIT"))),
+        ("結算日正常",      dict(record=_record(**settle), today=SETTLEMENT)),
         ("結算日不確定",    dict(record=_record(lots=None, status=UNCERTAIN,
                                               uncertain_stage=UNCERTAIN_ENTRY, **settle),
-                                today=SETTLEMENT), {}),
+                                today=SETTLEMENT)),
         ("出場不確定",      dict(record=_record(lots=None, status=UNCERTAIN,
-                                              uncertain_stage=UNCERTAIN_EXIT)), {}),
+                                              uncertain_stage=UNCERTAIN_EXIT))),
         ("不確定持有幾口",  dict(record=_record(lots=None, status=UNCERTAIN,
                                               uncertain_stage=UNCERTAIN_ENTRY),
-                                broker=FakeBroker(query_result=None)), {}),
+                                broker=FakeBroker(query_result=None))),
         ("開關關著有部位",  dict(record=_record(),
-                                cfg=make_config(auto_order_enabled=False)), {}),
+                                cfg=make_config(auto_order_enabled=False))),
         ("出場失敗",        dict(record=_record(),
-                                broker=FakeBroker(order_error=OrderFailed("代碼 1038"))), {}),
+                                broker=FakeBroker(order_error=OrderFailed("代碼 1038")))),
         ("出場收不到回報",  dict(record=_record(),
-                                broker=FakeBroker(order_error=FillUnknown("逾時", order_seq="S"))), {}),
-        ("部分成交",        dict(record=_record(lots=2), fills=[1]), {}),
-        ("出場成功",        dict(record=_record()), {}),
+                                broker=FakeBroker(order_error=FillUnknown("逾時", order_seq="S")))),
+        ("部分成交",        dict(record=_record(lots=2), fills=[1])),
+        ("出場成功",        dict(record=_record())),
+        # 以下三個是 2026-08-23 用執行軌跡量出來補的——在那之前這張表
+        # 自稱涵蓋全部結局，實際上漏了它們。
+        ("狀態檔讀不懂",    dict(raw_state='{"trading_day": 202608')),
+        ("查出早上沒成交",  dict(record=_record(lots=None, status=UNCERTAIN,
+                                              uncertain_stage=UNCERTAIN_ENTRY),
+                                broker=FakeBroker(query_result=0))),
+        ("出場登入失敗",    dict(record=_record(),
+                                broker=FakeBroker(login_error=RuntimeError("斷線")))),
     ]
 
 
-@pytest.mark.parametrize("label,kwargs,_", _exit_scenarios(),
-                         ids=[s[0] for s in _exit_scenarios()])
-def test_saying_something_and_a_non_zero_exit_code_go_together(label, kwargs, _):
+def _scenario(label: str) -> dict:
+    """依名字取一份**全新**的安排——每次呼叫都重建裡面的假 broker。"""
+    return dict(_exit_scenarios())[label]
+
+
+@pytest.mark.parametrize("label", [s[0] for s in _exit_scenarios()])
+def test_saying_something_and_a_non_zero_exit_code_go_together(label):
     """**每一種結局都要滿足：發了訊息 ⟺ exit_code 非零。**
 
-    這條測試的價值在於它涵蓋**全部** 12 種結局。加一種新結局時，
-    只要忘了讓兩者同步，這裡就會紅——而在它存在之前，那個規則
-    只活在 12 個各自為政的 return 敘述裡。
+    下面那張表涵蓋 `run_exit` 的**每一個出口**——2026-08-23 用執行軌跡
+    實際量過，15 個全中。
+
+    ⚠️ **沒有任何機制強迫它保持完整。** 加一種新結局時要自己來補一列，
+    漏了不會變紅，只會靜靜地少測一個出口。這段原本寫「忘了同步這裡就會紅」，
+    那是假的——而且當時那張表自稱涵蓋全部，實際上漏了三個
+    （狀態檔讀不懂、查出早上沒成交、出場登入失敗）。
     """
-    outcome, notifier, _broker = _run(**kwargs)
+    outcome, notifier, _broker = _run(**_scenario(label))
     said_something = notifier.sent != []
     assert said_something == (outcome.exit_code != 0), (
         f"「{label}」違反規則：發了 {len(notifier.sent)} 則訊息，"
@@ -563,21 +627,25 @@ def test_saying_something_and_a_non_zero_exit_code_go_together(label, kwargs, _)
     )
 
 
-@pytest.mark.parametrize("label,kwargs,_", _exit_scenarios(),
-                         ids=[s[0] for s in _exit_scenarios()])
-def test_the_rule_holds_even_with_discord_switched_off(label, kwargs, _):
+@pytest.mark.parametrize("label", [s[0] for s in _exit_scenarios()])
+def test_the_rule_holds_even_with_discord_switched_off(label):
     """**Discord 關著時，`notified` 是 False 但 `exit_code` 不變。**
 
     不變量講的是「有沒有東西要講」，不是「講成功了沒」。
     寫成「notified ⟺ exit_code」的話，關掉 Discord 會讓所有異常的一天
     看起來都正常——那正是最危險的一種靜默。
     """
-    cfg = kwargs.get("cfg") or make_config(auto_order_enabled=True)
-    kwargs = {**kwargs, "cfg": replace(cfg, discord_enabled=False)}
-    outcome, notifier, _broker = _run(**kwargs)
+    def run(discord: bool):
+        # ⚠️ 每次都重新取一份情境。共用同一個 FakeBroker 實例的話，
+        #    第二次跑會拿到被第一次動過的假 broker——現在的情境剛好都
+        #    無狀態所以看不出來，但那是巧合，不是保證。
+        kwargs = _scenario(label)
+        cfg = kwargs.get("cfg") or make_config(auto_order_enabled=True)
+        return _run(**{**kwargs, "cfg": replace(cfg, discord_enabled=discord)})
+
+    outcome, notifier, _broker = run(discord=False)
     assert notifier.sent == [], "Discord 關著就不該真的送出去"
-    baseline, _, _ = _run(**{k: v for k, v in kwargs.items() if k != "cfg"},
-                          cfg=cfg)
+    baseline, _, _ = run(discord=True)
     assert outcome.exit_code == baseline.exit_code, (
         f"「{label}」的結束狀態不該受 Discord 開關影響"
     )

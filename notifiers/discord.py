@@ -198,8 +198,14 @@ def build_exit_unknown_payload(record, reason: str, trading_date: date) -> dict:
         #    對照 `build_exit_blocked_payload`：那一則講的是**早上那筆**委託
         #    （「早上送出過 N 口的委託」），所以它用 `requested_lots` 是對的。
         #    兩則描述的是不同的委託，不可以互相參照。
-        f"送出的是：{_SIDE_TEXT.get(record.exit_side, record.exit_side)} "
-        f"{record.lots} 口",
+        f"送出的是：{_SIDE_TEXT.get(record.exit_side, record.exit_side)}，"
+        # ⚠️ **重跑時這裡沒有數字。** 記成「不確定」的那一刻，狀態檔就依
+        #    `PositionRecord` 的規定把口數抹掉了（`UNCERTAIN ⇒ lots is None`，
+        #    理由是「填數字會讓它看起來像已知的結果」）。所以第一次發這則訊息
+        #    時有數字（那時 record 還是 CONFIRMED），重跑讀回來就沒有了。
+        #    印出 `None` 比不印更糟——這則訊息的用途正是叫人拿數字去對帳。
+        + (f"{record.lots} 口" if record.lots is not None
+           else "口數見第一次那則通知（狀態檔不留不確定的口數）"),
         f"原因：{reason}",
         "",
         "**請先確認帳戶實際部位再決定要不要補單。**",

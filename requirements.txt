@@ -9,3 +9,7 @@ pywin32>=306; sys_platform == "win32"
 
 # 開發
 pytest>=8.0
+
+# 靜態檢查。broker/capital.py 有 400 行只在真的連上 COM 元件時才會跑，
+# 測試永遠執行不到——見 tests/test_static_checks.py。
+pyflakes>=3.0

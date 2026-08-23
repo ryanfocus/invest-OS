@@ -26,7 +26,6 @@ import logging
 import os
 import time
 import winreg
-from dataclasses import dataclass
 
 from broker import (
     FillUnknown,
@@ -35,6 +34,7 @@ from broker import (
     OrderFailed,
     OrderRequest,
     OrderResult,
+    PRODUCT_CODES,
     ProductListUnavailable,
     Quote,
     QuoteNotReady,
@@ -44,14 +44,11 @@ from broker import (
 # 線路格式的解析住在隔壁——這個檔案只管 COM 生命週期。
 # 分家的理由見 `capital_wire` 的模組說明（2026-08-23 架構檢視）。
 from broker.capital_wire import (
-    _MARKET_FUTURES_REPLY,
     FillSummary,
-    ReplyRow,
     build_future_order_fields,
     parse_filled_lots,
     parse_order_book_no,
     parse_product_list,
-    parse_reply_row,
     summarize_fills,
 )
 
@@ -82,16 +79,11 @@ _PRICE_SCALE = 100.0
 #    在向營業員確認之前，不可以把它當成防護。
 _AUTHORITY_FLAGS = {"production": 0, "test": 2}
 
-# 查詢的兩種非答案。**必須分開處理**：查無資料是正常的（單還沒成交、
-# 或那天沒交易），查詢錯誤是故障。兩者都不可以當成「確定沒成交」。
 # 官方文件：「限制每次查詢間需間隔五秒」。多留 0.5 秒緩衝。
 _QUERY_INTERVAL_SECONDS = 5.5
 
 
 __all__ = ["CapitalBroker"]
-
-
-
 
 
 def _resolve_dll_path() -> str:
@@ -147,13 +139,6 @@ class _ReplyEvents:
 
     def OnComplete(self, bstrUserID):
         pass
-
-
-
-
-
-
-
 
 
 class _CenterEvents:

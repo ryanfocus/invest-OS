@@ -79,8 +79,9 @@ def test_the_exit_unknown_message_says_what_was_actually_sent():
         last_trading_day=20260916, order_seq="SEQ1",
     )
     text = build_exit_unknown_payload(record, "逾時", date(2026, 8, 21))["content"]
-    assert "賣出 2 口" in text, f"出場送的是 2 口（實際成交），不是 3 口（委託量）：{text}"
-    assert "3 口" not in text
+    # 斷言的是數字，不是排版——「賣出 2 口」那樣寫，改個標點就會紅。
+    assert "賣出" in text and "2 口" in text, f"出場送的是 2 口（實際成交）：{text}"
+    assert "3 口" not in text, f"3 口是早上的委託量，不是下午送出去的：{text}"
 
 
 def test_the_exit_blocked_message_still_describes_the_morning_order():

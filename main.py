@@ -652,16 +652,13 @@ def run_exit(
     13:40 再去連一次報價主機只是多一個會失敗的地方，而那時候失敗的代價是部位過夜。
     """
 
-    def _send(payload) -> bool:
-        return _notify_if_enabled(config, notify, payload)
-
     def _finish(payload=None, *, remaining, exited=False,
                 failure=None, skipped=False) -> ExitOutcome:
         """**出場那班唯一的出口。**
 
         它代表一條規則：**有東西要講 ⟺ 非零結束碼**。
-        12 個結局全部滿足它，而在 2026-08-23 架構檢視之前，那條規則
-        在程式裡沒有任何一處代表它——它被重新宣告了 12 次，
+        15 個出口全部滿足它，而在 2026-08-23 架構檢視之前，那條規則
+        在程式裡沒有任何一處代表它——`ExitOutcome` 被直接建了 12 次，
         於是 `b6187c0`／`fd4bd04` 兩次改動都得挨個出口去對。
 
         ⚠️ 精確一點：不變量是「**有東西要講**」（`payload is not None`），
@@ -673,7 +670,8 @@ def run_exit(
         return ExitOutcome(
             exited=exited,
             remaining=remaining,
-            notified=_send(payload) if payload is not None else False,
+            notified=(_notify_if_enabled(config, notify, payload)
+                      if payload is not None else False),
             exit_code=0 if payload is None else 1,
             failure=failure,
             skipped=skipped,

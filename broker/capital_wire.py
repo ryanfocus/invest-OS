@@ -259,6 +259,41 @@ class FillSummary:
         )
 
 
+def parse_reply_row(row: str) -> ReplyRow | None:
+    """解析一列 `OnNewData` 回報。看不懂就回 `None`（不是我們的單、或格式不符）。
+
+    欄位位置**已於 2026-08-17 實機驗證**（見 tests/test_reply_parsing.py，
+    期望值來自交易所回來的真實字串，不是對文件的推導）。
+
+    但形狀檢查**沒有因此變得多餘**，理由換了一個：回報事件是共用的，
+    證券（TS）、海期（OF）等格式完全不同的東西會走同一條線進來，
+    而已驗證的樣本只涵蓋一種商品、一種情境。遇到沒見過的格式時，
+    唯一安全的行為是承認看不懂——回 None 讓上層當成「沒收到回報」處理
+    （ticket 05 會記為「不確定」並要求人工確認）。
+
+    Qty 抓錯的代價仍然是最貴的那個：記進狀態檔的口數錯 → 下午照那個數字平倉
+    → 多平的部分變成方向相反的新倉。
+    """
+    fields = row.split(",")
+    if len(fields) <= _REPLY_QTY:
+        return None
+    if fields[_REPLY_MARKET].strip() != _MARKET_FUTURES_REPLY:
+        return None
+    row_type = fields[_REPLY_TYPE].strip()
+    if row_type not in _REPLY_TYPES:
+        return None
+    qty = fields[_REPLY_QTY].strip()
+    if not qty.isdigit():
+        return None
+
+    return ReplyRow(
+        seq=fields[_REPLY_KEYNO].strip() or fields[-1].strip(),
+        type=row_type,
+        failed=fields[_REPLY_ERR].strip() == "Y",
+        qty=int(qty),
+    )
+
+
 def summarize_fills(rows, seq: str) -> FillSummary:
     """彙整同一筆委託的回報，算出實際成交口數。
 
@@ -320,41 +355,6 @@ def summarize_fills(rows, seq: str) -> FillSummary:
         matched_rows=matched,
         saw_cancel=saw_cancel,
         reject_reason=reject_reason if filled == 0 else "",
-    )
-
-
-def parse_reply_row(row: str) -> ReplyRow | None:
-    """解析一列 `OnNewData` 回報。看不懂就回 `None`（不是我們的單、或格式不符）。
-
-    欄位位置**已於 2026-08-17 實機驗證**（見 tests/test_reply_parsing.py，
-    期望值來自交易所回來的真實字串，不是對文件的推導）。
-
-    但形狀檢查**沒有因此變得多餘**，理由換了一個：回報事件是共用的，
-    證券（TS）、海期（OF）等格式完全不同的東西會走同一條線進來，
-    而已驗證的樣本只涵蓋一種商品、一種情境。遇到沒見過的格式時，
-    唯一安全的行為是承認看不懂——回 None 讓上層當成「沒收到回報」處理
-    （ticket 05 會記為「不確定」並要求人工確認）。
-
-    Qty 抓錯的代價仍然是最貴的那個：記進狀態檔的口數錯 → 下午照那個數字平倉
-    → 多平的部分變成方向相反的新倉。
-    """
-    fields = row.split(",")
-    if len(fields) <= _REPLY_QTY:
-        return None
-    if fields[_REPLY_MARKET].strip() != _MARKET_FUTURES_REPLY:
-        return None
-    row_type = fields[_REPLY_TYPE].strip()
-    if row_type not in _REPLY_TYPES:
-        return None
-    qty = fields[_REPLY_QTY].strip()
-    if not qty.isdigit():
-        return None
-
-    return ReplyRow(
-        seq=fields[_REPLY_KEYNO].strip() or fields[-1].strip(),
-        type=row_type,
-        failed=fields[_REPLY_ERR].strip() == "Y",
-        qty=int(qty),
     )
 
 
