@@ -11,7 +11,7 @@ from datetime import date
 import pytest
 
 from broker import MTX_CODE, TMF_CODE, TX_CODE, ContractInfo, ProductListUnavailable
-from broker.capital import parse_product_list
+from broker.capital_wire import parse_product_list
 
 # 實際回傳格式：「%類別碼%類別名%」開頭，接著以「;」分隔的
 # 「商品代碼,名稱,最後交易日,交易所代碼」

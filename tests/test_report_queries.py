@@ -35,7 +35,7 @@ import os
 
 import pytest
 
-from broker.capital import parse_filled_lots, parse_order_book_no
+from broker.capital_wire import parse_filled_lots, parse_order_book_no
 
 CRLF = chr(13) + chr(10)     # 群益查詢回傳的換行
 DAY = 20260819
@@ -340,14 +340,14 @@ def test_no_data_and_a_query_error_are_logged_differently(caplog):
     這條後備管道靜靜地永遠回 None，而每天照樣要人介入。
     """
     import logging
-    from broker.capital import _query_rows
+    from broker.capital_wire import _query_rows
 
-    with caplog.at_level(logging.INFO, logger="broker.capital"):
+    with caplog.at_level(logging.INFO, logger="broker.capital_wire"):
         _query_rows("M003")
     levels_for_no_data = {r.levelno for r in caplog.records}
 
     caplog.clear()
-    with caplog.at_level(logging.INFO, logger="broker.capital"):
+    with caplog.at_level(logging.INFO, logger="broker.capital_wire"):
         _query_rows("M999: 查詢錯誤")
     levels_for_error = {r.levelno for r in caplog.records}
 
@@ -357,12 +357,12 @@ def test_no_data_and_a_query_error_are_logged_differently(caplog):
 
 def test_a_query_error_row_is_never_parsed_as_data():
     """萬一 M999 的訊息剛好有夠多逗號，也不可以被當成資料列。"""
-    from broker.capital import _query_rows
+    from broker.capital_wire import _query_rows
     assert _query_rows("M999," + ",".join(["x"] * 40)) == []
 
 
 def test_a_no_data_marker_is_never_parsed_as_data():
-    from broker.capital import _query_rows
+    from broker.capital_wire import _query_rows
     assert _query_rows("M003," + ",".join(["x"] * 40)) == []
 
 
@@ -490,7 +490,7 @@ def test_the_single_leg_fill_price_position_is_real():
     價格那欄一起驗：44838 進、45135 出，都是當天真實的成交價。
     兩個位置同時對，才排除得掉「碰巧」。
     """
-    from broker.capital import _FILL_PRICE
+    from broker.capital_wire import _FILL_PRICE
     entry, exit_ = _fill_rows()
     assert float(entry.split(",")[_FILL_PRICE]) == 44838.0
     assert float(exit_.split(",")[_FILL_PRICE]) == 45135.0

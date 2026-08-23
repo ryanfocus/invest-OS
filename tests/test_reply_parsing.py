@@ -25,7 +25,7 @@
 
 import os
 
-from broker.capital import parse_reply_row
+from broker.capital_wire import parse_reply_row
 
 _FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures",
                         "onnewdata-real-2026-08-17.txt")
@@ -83,7 +83,7 @@ def test_a_real_fill_row_has_no_keyno_and_falls_back_to_the_trailing_seqno():
 
 def test_both_real_rows_belong_to_the_same_order():
     """`summarize_fills` 用整列子字串比對序號。真實資料要能通過那個比對。"""
-    from broker.capital import summarize_fills
+    from broker.capital_wire import summarize_fills
 
     rows = _real_rows()
     seq = parse_reply_row(rows[0]).seq

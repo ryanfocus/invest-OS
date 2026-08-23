@@ -11,7 +11,7 @@
 """
 
 from broker import BUY, ENTRY, EXIT, MTX_CODE, SELL, OrderRequest
-from broker.capital import build_future_order_fields
+from broker.capital_wire import build_future_order_fields
 
 REQUEST = OrderRequest(
     product=MTX_CODE, order_code="MTX08", contract_month="202608",

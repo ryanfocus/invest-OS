@@ -12,7 +12,7 @@
   前一批回報，都會出現在同一個緩衝區。加總到別人的成交上，下午就會平錯口數。
 """
 
-from broker.capital import summarize_fills
+from broker.capital_wire import summarize_fills
 
 
 def _row(row_type, err="N", qty="2", seq="SEQ0000000001"):

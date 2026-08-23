@@ -335,7 +335,7 @@ def _check_parsers(label: str, text: str, redact) -> None:
     ⚠️ 這裡**只印結果，不判定對錯**——工具不知道正確答案是什麼。
     要人自己對照上面的原始字串看：抓出來的委託書號、口數，是不是那一列真正的值。
     """
-    from broker.capital import parse_filled_lots, parse_order_book_no
+    from broker.capital_wire import parse_filled_lots, parse_order_book_no
 
     first = text.splitlines()[0].split(",")
     if len(first) <= 11:
@@ -366,7 +366,7 @@ def listen(broker, seconds: float, redact) -> int:
     """坐在回報頻道上聽。**這是本工具最有價值的部分。**"""
     import pythoncom
 
-    from broker.capital import parse_reply_row
+    from broker.capital_wire import parse_reply_row
 
     _head("6. 監聽成交回報")
     _info(f"監聽 {seconds:.0f} 秒（Ctrl+C 可提早結束）")
