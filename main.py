@@ -102,6 +102,22 @@ class EntryOutcome:
     is_settlement_day: bool = False
 
 
+def _notify_if_enabled(config: Config, notify, payload) -> bool:
+    """發一則 Discord，除非開關關著。回傳**實際上有沒有送出去**。
+
+    ⚠️ **回傳值是事實，不是意圖。** 呼叫端拿它填 `notified`，
+    而那是「使用者知道這件事了嗎」的唯一記錄——寫死成 True 的話，
+    等於在結果裡埋一個假的安心（2026-08-23 修過一次）。
+
+    收在這裡而不是各自寫一份：兩班原本各有一個逐字相同的閉包，
+    於是「Discord 開關」這個接縫有兩個實作。
+    """
+    if not config.discord_enabled:
+        logger.info("Discord 已關閉，不發送")
+        return False
+    return bool(notify(payload))
+
+
 def _fetch_open_prices(broker, attempts: int, interval: int, sleep, trading_day: int) -> OpenPrices:
     """取開盤價，未就緒就重試。全部用完仍未就緒 → 讓最後一個 QuoteNotReady 冒出去。
 
@@ -404,10 +420,7 @@ def _run_strategy(
     """
 
     def _send(payload) -> bool:
-        if not config.discord_enabled:
-            logger.info("Discord 已關閉，不發送")
-            return False
-        return bool(notify(payload))
+        return _notify_if_enabled(config, notify, payload)
 
     def _fatal(reason: str) -> EntryOutcome:
         logger.error("致命錯誤：%s", reason)
@@ -640,14 +653,35 @@ def run_exit(
     """
 
     def _send(payload) -> bool:
-        if not config.discord_enabled:
-            logger.info("Discord 已關閉，不發送")
-            return False
-        return bool(notify(payload))
+        return _notify_if_enabled(config, notify, payload)
+
+    def _finish(payload=None, *, remaining, exited=False,
+                failure=None, skipped=False) -> ExitOutcome:
+        """**出場那班唯一的出口。**
+
+        它代表一條規則：**有東西要講 ⟺ 非零結束碼**。
+        12 個結局全部滿足它，而在 2026-08-23 架構檢視之前，那條規則
+        在程式裡沒有任何一處代表它——它被重新宣告了 12 次，
+        於是 `b6187c0`／`fd4bd04` 兩次改動都得挨個出口去對。
+
+        ⚠️ 精確一點：不變量是「**有東西要講**」（`payload is not None`），
+        不是「講成功了」。Discord 關閉時 `notified` 會是 False，
+        但 `exit_code` 仍然是 1——那一天仍然有事情不對勁，
+        只是使用者沒被通知到。寫成「notified ⟺ exit_code」的話，
+        關掉 Discord 會讓所有異常的一天看起來都正常。
+        """
+        return ExitOutcome(
+            exited=exited,
+            remaining=remaining,
+            notified=_send(payload) if payload is not None else False,
+            exit_code=0 if payload is None else 1,
+            failure=failure,
+            skipped=skipped,
+        )
 
     def _quiet() -> ExitOutcome:
-        return ExitOutcome(exited=False, remaining=0, notified=False,
-                           exit_code=0, skipped=True)
+        """今天沒有事情要做，也沒有事情要講。"""
+        return _finish(remaining=0, skipped=True)
 
     if not is_trading_day(
         today,
@@ -664,9 +698,8 @@ def run_exit(
         # （＝開出反向新倉），也可能什麼都不做而讓部位過夜。交給人。
         reason = f"狀態檔異常，未出場：{exc}"
         logger.error("%s", reason)
-        notified = _send(build_exit_state_broken_payload(reason, today))
-        return ExitOutcome(exited=False, remaining=None, notified=notified,
-                           exit_code=1, failure=reason)
+        return _finish(build_exit_state_broken_payload(reason, today),
+                       remaining=None, failure=reason)
 
     if record is None or record.trading_day != to_yyyymmdd(today):
         logger.info("沒有今日的部位記錄，不做任何事")
@@ -701,10 +734,10 @@ def run_exit(
             # **但這一種要講。** 部位會照樣被結算，可是早上不知道成交幾口
             # 這件事結算不會補上——使用者仍然要去對那筆帳，
             # 否則那天的損益永遠是個謎。這不是「出場成功」，是「有事不對勁」。
-            notified = _send(build_settlement_uncertain_payload(record, today))
-            return ExitOutcome(exited=True, remaining=None, notified=notified,
-                               exit_code=1, failure="結算日，但不知道持有幾口")
-        return ExitOutcome(exited=True, remaining=0, notified=False, exit_code=0)
+            return _finish(build_settlement_uncertain_payload(record, today),
+                           remaining=None, exited=True,
+                           failure="結算日，但不知道持有幾口")
+        return _finish(remaining=0, exited=True)
 
     if record.uncertain_exit:
         # ⚠️ **不確定的是出場那一筆——一張單都不准再送。**
@@ -720,9 +753,8 @@ def run_exit(
         # 可能已經成交的單，絕不可以自動再送一次。
         reason = "出場委託的成交狀況不確定，未重複送單"
         logger.error("%s", reason)
-        notified = _send(build_exit_unknown_payload(record, reason, today))
-        return ExitOutcome(exited=False, remaining=None, notified=notified,
-                           exit_code=1, failure=reason)
+        return _finish(build_exit_unknown_payload(record, reason, today),
+                       remaining=None, failure=reason)
 
     if record.is_uncertain:
         # 走到這裡代表不確定的是**進場**那一筆（`uncertain_entry`）。
@@ -740,9 +772,8 @@ def run_exit(
             # 查詢也答不出來 → 走 ticket 05 定的契約：不知道持有幾口就不准下單。
             reason = "不確定持有幾口，未自動出場"
             logger.error("%s", reason)
-            notified = _send(build_exit_blocked_payload(record, today))
-            return ExitOutcome(exited=False, remaining=None, notified=notified,
-                               exit_code=1, failure=reason)
+            return _finish(build_exit_blocked_payload(record, today),
+                           remaining=None, failure=reason)
         if lots == 0:
             # **確定早上沒成交**——沒有部位，今天什麼都不用做，也不必打擾人。
             # 與「查不到」是完全不同的答案。
@@ -763,9 +794,8 @@ def run_exit(
         # 靜默結束等於讓部位過夜而沒有人知道。
         reason = "自動下單已關閉，但帳上仍有今日部位記錄，未自動出場"
         logger.error("%s", reason)
-        notified = _send(build_exit_blocked_payload(record, today))
-        return ExitOutcome(exited=False, remaining=record.lots, notified=notified,
-                           exit_code=1, failure=reason)
+        return _finish(build_exit_blocked_payload(record, today),
+                       remaining=record.lots, failure=reason)
 
     request = OrderRequest(
         product=record.product,
@@ -785,9 +815,8 @@ def run_exit(
     except Exception as exc:  # noqa: BLE001
         reason = f"出場登入失敗：{exc}"
         logger.error("%s", reason)
-        notified = _send(build_exit_failed_payload(record, str(exc), today))
-        return ExitOutcome(exited=False, remaining=record.lots, notified=notified,
-                           exit_code=1, failure=reason)
+        return _finish(build_exit_failed_payload(record, str(exc), today),
+                       remaining=record.lots, failure=reason)
 
     result, last_error = None, None
     for attempt in range(1, attempts + 1):
@@ -811,9 +840,8 @@ def run_exit(
                         order_seq=exc.order_seq or record.order_seq),
                 path=state_path,
             )
-            notified = _send(build_exit_unknown_payload(record, str(exc), today))
-            return ExitOutcome(exited=False, remaining=None, notified=notified,
-                               exit_code=1, failure=reason)
+            return _finish(build_exit_unknown_payload(record, str(exc), today),
+                           remaining=None, failure=reason)
         except OrderFailed as exc:
             # 確定沒送出去 → 重試是安全的，而且應該做。
             last_error = exc
@@ -827,9 +855,8 @@ def run_exit(
 
     if result is None:
         reason = f"出場委託送出失敗：{last_error}"
-        notified = _send(build_exit_failed_payload(record, str(last_error), today))
-        return ExitOutcome(exited=False, remaining=record.lots, notified=notified,
-                           exit_code=1, failure=reason)
+        return _finish(build_exit_failed_payload(record, str(last_error), today),
+                       remaining=record.lots, failure=reason)
 
     remaining = record.lots - result.filled_lots
     if remaining > 0:
@@ -837,14 +864,13 @@ def run_exit(
         reason = f"出場只成交 {result.filled_lots} 口，還剩 {remaining} 口"
         logger.error("%s", reason)
         write_position(replace(record, lots=remaining), path=state_path)
-        notified = _send(build_partial_exit_payload(record, remaining, today))
-        return ExitOutcome(exited=False, remaining=remaining, notified=notified,
-                           exit_code=1, failure=reason)
+        return _finish(build_partial_exit_payload(record, remaining, today),
+                       remaining=remaining, failure=reason)
 
     logger.info("出場完成，平掉 %d 口", result.filled_lots)
     write_position(replace(record, exited=True, close_reason=BY_EXIT), path=state_path)
     # 例行出場不發 Discord——使用者要求每天只有一則訊息（早上那則訊號）。
-    return ExitOutcome(exited=True, remaining=0, notified=False, exit_code=0)
+    return _finish(remaining=0, exited=True)
 
 
 def _build_runtime():
