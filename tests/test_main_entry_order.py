@@ -460,3 +460,58 @@ def test_a_corrupted_state_file_stops_the_order(state_file):
     assert broker.orders == []
     assert outcome.exit_code != 0
     assert len(notifier.sent) == 2, "訊號一則、狀態檔壞掉告警一則"
+
+
+def test_a_repeat_run_with_discord_off_does_not_claim_it_notified(state_file):
+    """**`notified` 是事實，不是意圖。**
+
+    `_order_failed` 的 docstring 已經寫下這條規則：「不寫死——Discord 關閉時
+    它是 False」。但重跑＋不確定那個出口把 `notified=True` 寫死了。
+
+    為什麼要緊：`notified` 是「使用者知道這件事了嗎」的唯一記錄。
+    宣稱通知了但其實沒有，等於在結果裡埋一個假的安心——
+    而這個出口正是「帳上可能有一個沒人管的部位」那一種。
+
+    467 條測試沒有一條用 `discord_enabled=False` 走到這條路徑。
+    """
+    from state import UNCERTAIN, UNCERTAIN_ENTRY
+    write_position(
+        PositionRecord(
+            trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+            contract_month="202608", side=BUY, lots=None, requested_lots=2,
+            last_trading_day=20260819, status=UNCERTAIN,
+            uncertain_stage=UNCERTAIN_ENTRY, order_seq="SEQ1",
+        ),
+        path=str(state_file),
+    )
+    outcome = run_entry(
+        make_config(auto_order_enabled=True, discord_enabled=False),
+        today=D, broker=FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS),
+        notify=RecordingNotifier(), sleep=lambda _s: None,
+        state_path=str(state_file), observations_path=observations_path(),
+        fetch_official=lambda day: None,
+    )
+    assert outcome.notified is False, "Discord 關著就沒有通知，不可以宣稱有"
+    assert outcome.exit_code == 1, "但仍然要以錯誤結束——那個部位還沒人管"
+
+
+def test_a_repeat_run_with_discord_on_does_report_it_notified():
+    """對照組。少了它，上面那條可以靠「一律寫 False」通過。"""
+    from state import UNCERTAIN, UNCERTAIN_ENTRY
+    write_position(
+        PositionRecord(
+            trading_day=20260810, product=MTX_CODE, order_code="MTX08",
+            contract_month="202608", side=BUY, lots=None, requested_lots=2,
+            last_trading_day=20260819, status=UNCERTAIN,
+            uncertain_stage=UNCERTAIN_ENTRY, order_seq="SEQ1",
+        ),
+        path=state_path(),
+    )
+    outcome = run_entry(
+        make_config(auto_order_enabled=True, discord_enabled=True),
+        today=D, broker=FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS),
+        notify=RecordingNotifier(), sleep=lambda _s: None,
+        state_path=state_path(), observations_path=observations_path(),
+        fetch_official=lambda day: None,
+    )
+    assert outcome.notified is True

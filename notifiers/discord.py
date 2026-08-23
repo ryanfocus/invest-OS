@@ -189,8 +189,17 @@ def build_exit_unknown_payload(record, reason: str, trading_date: date) -> dict:
         "❓ **出場委託已送出，但收不到回報**",
         "",
         f"商品：{record.order_code}（{record.contract_month}）",
+        # ⚠️ **這裡是 `lots` 不是 `requested_lots`。** 出場單送的是早上
+        #    **實際成交**的口數（見 main.py 的 `lots=record.lots`）。
+        #    早上委託 3 口只成交 2 口時，下午送的是 2 口——而這則訊息的用途
+        #    正是叫人「先確認帳戶實際部位再決定要不要補單」，數字錯在這裡，
+        #    人會拿著錯的數字去對帳，然後補一筆錯的單。
+        #
+        #    對照 `build_exit_blocked_payload`：那一則講的是**早上那筆**委託
+        #    （「早上送出過 N 口的委託」），所以它用 `requested_lots` 是對的。
+        #    兩則描述的是不同的委託，不可以互相參照。
         f"送出的是：{_SIDE_TEXT.get(record.exit_side, record.exit_side)} "
-        f"{record.requested_lots} 口",
+        f"{record.lots} 口",
         f"原因：{reason}",
         "",
         "**請先確認帳戶實際部位再決定要不要補單。**",

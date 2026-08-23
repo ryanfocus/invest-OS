@@ -257,10 +257,15 @@ def _fetch_official_opens(trading_day: int):
     return fetch_official_opens(trading_day)
 
 
-def _resolve_uncertain(broker, record, today: date) -> int | None:
+def _resolve_uncertain(broker, record) -> int | None:
     """出場前替一筆「不確定」的記錄問一次成交結果（ticket 09）。
 
     回 `None` 代表還是不知道 → 走 ticket 05 的老路（不送單、發 Discord 要人處理）。
+
+    ⚠️ **刻意不收 `today`。** 查詢要問的是「**那筆委託送出的那一天**」，
+    而那是 `record.trading_day`——不是今天。兩者在正常情況下相同，
+    但隔夜殘留的記錄會讓它們不同，那時拿今天去查會查不到任何東西。
+    初版收了 `today` 卻從未使用（介面在說謊），2026-08-23 架構檢視時拿掉。
 
     **登入放在這裡。** 查詢需要下單元件與帳號，而 `run_exit` 更前面那些路徑
     （非交易日、沒有今日記錄、結算日）根本不該連線。
@@ -478,9 +483,14 @@ def _run_strategy(
             # 「早上送出的委託仍未確認成交／方向：買進」——方向與委託都是錯的。
             reason = "早上送出的委託仍未確認成交，狀態尚未解決"
             logger.error("%s", reason)
-            _send(build_fill_unknown_payload(existing, reason, today))
+            # ⚠️ **`notified` 沿用 `_send` 的實際結果，不寫死。**
+            #    它是「使用者知道這件事了嗎」的唯一記錄，而這個出口正是
+            #    「帳上可能有一個沒人管的部位」那一種——宣稱通知了但其實沒有，
+            #    等於在結果裡埋一個假的安心。
+            #    這條規則 `_order_failed` 的 docstring 早就寫下了，這裡漏了。
+            notified = _send(build_fill_unknown_payload(existing, reason, today))
             return EntryOutcome(
-                signal=None, opens=None, notified=True, exit_code=1, failure=reason
+                signal=None, opens=None, notified=notified, exit_code=1, failure=reason
             )
 
         return EntryOutcome(
@@ -724,7 +734,7 @@ def run_exit(
         #    「只發 Discord、不下單」的模式下**完全不呼叫任何下單 API**——
         #    使用者關掉開關通常正是想切斷程式與券商的連線。
         #    查不成就照舊發「不確定」那則，訊息本身不需要 broker。
-        lots = (_resolve_uncertain(broker, record, today)
+        lots = (_resolve_uncertain(broker, record)
                 if config.auto_order_enabled else None)
         if lots is None:
             # 查詢也答不出來 → 走 ticket 05 定的契約：不知道持有幾口就不准下單。
