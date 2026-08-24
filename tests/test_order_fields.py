@@ -95,17 +95,25 @@ def test_account_is_passed_through():
 #    那一格要等訊號方向與使用者持倉相反的那天才碰得到。
 
 
-def test_entry_position_type_is_new_open():
-    """sNewClose：0 新倉、1 平倉、2 自動。進場目前送 0。
+def test_entry_uses_auto_so_the_order_can_cross_zero():
+    """sNewClose：0 新倉、1 平倉、2 自動。**進場送 2，不是 0。**
 
-    ✅ **2026-08-21 實機確認**：帳上已有 **1 口同方向**多單時送出 `sNewClose=0`，
-    **未被拒**，成交 1 口（序號 2315609807637，成交價 44838）。帳戶變成 2 口。
+    ❌ **2026-08-24 實機退單**：使用者持有 1 口 TM2609 多單、訊號做空，
+    OS 送出「賣 1 口、新倉」，券商回：
 
-    ⚠️ **但本張真正擔心的情境沒有驗到。** 疑慮原文是「已有**反向**部位時
-    『新倉』可能被拒」——當天是同方向加倉，沒有跨越零。
-    那一格仍然只有推測，見 ticket 04 的「只驗到容易的那一半」。
+        代碼 980：[980] 勾選新倉而有對應反向部位,退單!
+
+    台指期同帳號同商品同月份採**淨額計算**——賣掉那 1 口只是把使用者的多單
+    收掉，生不出任何新部位，所以「新倉」在語意上就是假的。
+
+    這推翻的不只是一個參數，是 SPEC 部位隔離那張策略作者確認過的表：
+    它要求 08:50 的賣單能從 +1 跨到 −2。**「新倉」跨不過零。**
+    留著 0 的話，使用者手上只要有反向部位，每個反向訊號日都會被退單。
+
+    ⚠️ 這一格改成 2 之後**仍未實機驗證**。今天證明的是「新倉」會被拒，
+       不是「自動」會成功——那是兩件事，要等下一個反向訊號日。
     """
-    assert _fields()["sNewClose"] == 0
+    assert _fields()["sNewClose"] == 2
 
 
 def test_exit_uses_auto_not_close_because_the_order_must_be_able_to_cross_zero():
@@ -148,8 +156,17 @@ def test_intent_cannot_be_omitted():
                      contract_month="202608", side=BUY, lots=1)
 
 
-def test_entry_and_exit_differ_only_in_position_type():
-    """其餘欄位（市價、IOC、不標當沖、盤中單）兩邊完全一樣。"""
+def test_entry_and_exit_now_send_identical_fields():
+    """**2026-08-24 起兩邊完全一樣**——包含倉別。
+
+    在那之前唯一的差別是 `sNewClose`（進場 0、出場 2），而那個差別是
+    980 退單的成因：進場的「新倉」跨不過零。兩邊都改成「自動」之後，
+    這張表就沒有任何一格會因為 `intent` 而不同了。
+
+    ⚠️ 這條會紅代表有人讓兩邊又分岔了。分岔本身不是錯（出場那格的取捨
+       隨時可能再變），但**必須是刻意的**——上一次不刻意的分岔花了三次
+       實機測試才發現。
+    """
     entry, exit_ = _fields(intent=ENTRY), _fields(intent=EXIT)
     differing = {k for k in entry if entry[k] != exit_[k]}
-    assert differing == {"sNewClose"}
+    assert differing == set(), f"進出場又分岔了：{differing}"

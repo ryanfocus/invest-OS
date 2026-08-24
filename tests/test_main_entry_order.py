@@ -56,6 +56,68 @@ def _run(opens, cfg=None, broker=None, today=D, now=ON_TIME):
     return outcome, notifier, broker
 
 
+# --- 前一交易日沒收掉的部位：只提醒，不擋交易 ---
+#
+# 2026-08-24 起進場的倉別是「自動」。它跨得過零，代價是**安靜**：
+# 帳上若有 OS 前一天沒收掉的部位，今天的反向委託會把它吃掉而沒有人知道。
+# 在那之前，「新倉」會因為 980 退單而大聲失敗——那個保護是券商意外給的，
+# 現在改由這裡明確提供。
+#
+# ⚠️ **只提醒，不擋。** 沒收掉的部位不會讓今天的交易變錯——SPEC 的部位隔離
+#    設計本來就假設帳上有別人的部位，程式進出等量、算術自然回復。
+#    停掉今天的交易是拿一個確定的損失去換一個不存在的風險。
+
+
+def _yesterday(**overrides) -> PositionRecord:
+    """前一個交易日留下的記錄。預設是「沒收掉」。"""
+    base = dict(
+        trading_day=20260807, product=MTX_CODE, order_code="MTX08",
+        contract_month="202608", last_trading_day=20260819,
+        side=BUY, lots=1, requested_lots=1, order_seq="SEQ0",
+    )
+    base.update(overrides)
+    return PositionRecord(**base)
+
+
+def test_an_unclosed_position_from_a_previous_day_is_reported():
+    write_position(_yesterday(), path=state_path())
+    _, notifier, _ = _run(LONG_OPENS)
+    assert "沒有收掉" in notifier.text, f"沒有提醒：{notifier.text}"
+    assert "20260807" in notifier.text or "08/07" in notifier.text, "沒講是哪一天的"
+
+
+def test_a_position_the_program_did_close_is_not_reported():
+    """**這是這條規則的核心：只認程式自己的部位。**
+
+    使用者的情境：今天程式買 1 口微台、13:40 自己賣掉了，之後使用者又
+    手動買回來一口。帳上有部位，但那是使用者的——程式對它一無所知，
+    也不該知道。這時候提醒就是假警報。
+
+    而假警報的代價是真的：使用者習慣忽略某一類訊息之後，
+    那類訊息就再也擋不住事情了。
+    """
+    write_position(_yesterday(exited=True, close_reason="EXIT"), path=state_path())
+    _, notifier, _ = _run(LONG_OPENS)
+    assert "沒有收掉" not in notifier.text, f"對已經收掉的部位發了假警報：{notifier.text}"
+
+
+def test_the_reminder_does_not_stop_todays_trade():
+    """提醒歸提醒，今天照常交易。"""
+    write_position(_yesterday(), path=state_path())
+    _, _, broker = _run(LONG_OPENS)
+    assert len(broker.orders) == 1, "提醒不該擋下今天的委託"
+
+
+def test_the_reminder_survives_an_uncertain_record_without_printing_none():
+    """不確定的記錄沒有口數（`UNCERTAIN ⇒ lots is None`），不可以印出 `None`。"""
+    from state import UNCERTAIN, UNCERTAIN_ENTRY
+    write_position(_yesterday(lots=None, status=UNCERTAIN,
+                              uncertain_stage=UNCERTAIN_ENTRY), path=state_path())
+    _, notifier, _ = _run(LONG_OPENS)
+    assert "沒有收掉" in notifier.text
+    assert "None" not in notifier.text, f"訊息裡印出了 None：{notifier.text}"
+
+
 # --- 時間關卡：太晚跑的那一班不下單 ---
 #
 # 排程設了「錯過就補跑」，而程式本身沒有時鐘。停電或 Windows 強制更新重開

@@ -67,6 +67,7 @@ from notifiers.discord import (
     build_exit_state_broken_payload,
     build_exit_unknown_payload,
     build_entry_too_late_payload,
+    build_stale_position_payload,
     build_fill_unknown_payload,
     build_observation_conflict_payload,
     build_partial_exit_payload,
@@ -499,6 +500,27 @@ def _run_strategy(
         state_error = ""
     except StateCorrupted as exc:
         existing, state_error = None, str(exc)
+
+    if (existing is not None
+            and existing.trading_day != to_yyyymmdd(today)
+            and not existing.exited):
+        # **前一個交易日的部位沒有收掉。只提醒，不擋交易。**
+        #
+        # 為什麼需要：2026-08-24 進場倉別改成「自動」之後，今天的反向委託
+        # 會把帳上那口舊部位**安靜地**吃掉。在那之前「新倉」會退單（980），
+        # 大聲失敗——但那是券商規則的副作用，不是我們的設計。
+        #
+        # 為什麼不擋：沒收掉的部位不會讓今天的交易變錯。SPEC 的部位隔離
+        # 設計本來就假設帳上有別人的部位，程式進出等量、算術自然回復。
+        # 停掉今天的交易是拿一個確定的損失去換一個不存在的風險。
+        #
+        # ⚠️ 條件精準地只認**程式自己的**部位：使用者手動買回來的那些
+        #    從來沒進過狀態檔。少了 `not existing.exited`，每次正常出場
+        #    的隔天都會發一則假警報——而習慣忽略某類訊息的人，
+        #    就再也不會看那類訊息了。
+        logger.warning("狀態檔裡有 %s 未出場的記錄（%s %s），發出提醒",
+                       existing.trading_day, existing.side, existing.order_code)
+        _send(build_stale_position_payload(existing, today))
 
     if existing is not None and existing.trading_day == to_yyyymmdd(today):
         logger.info("今日已有部位記錄（%s %s %s 口，狀態 %s），不重複進場",

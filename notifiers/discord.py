@@ -70,6 +70,41 @@ def build_order_failed_payload(reason: str, trading_date: date) -> dict:
     return {"content": "\n".join(lines)}
 
 
+def build_stale_position_payload(record, trading_date: date) -> dict:
+    """**前一個交易日的部位沒有收掉。** 純函式，無 I/O。
+
+    只在狀態檔裡有「過去日期 ＋ 未出場」的記錄時發。那個條件精準地
+    只認**程式自己的部位**：使用者手動買回來的那些從來沒進過狀態檔，
+    所以不會誤報。假警報的代價是真的——使用者習慣忽略某一類訊息之後，
+    那類訊息就再也擋不住事情了。
+
+    ⚠️ **這則不叫人停手。** 沒收掉的部位不會讓今天的交易變錯：SPEC 的
+    部位隔離設計本來就假設帳上有別人的部位，程式進出等量、算術自然回復。
+    它只會讓那一口沒人知道——所以要補的是知情，不是停手。
+
+    為什麼需要它：2026-08-24 進場倉別改成「自動」之後，反向委託會把
+    帳上的舊部位**安靜地**吃掉。在那之前「新倉」會退單（代碼 980），
+    大聲失敗——但那是券商規則的副作用，不是我們的設計。
+    """
+    lots = record.lots if record.lots is not None else record.requested_lots
+    known = record.lots is not None
+    day = str(record.trading_day)
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "⚠️ **前一個交易日的部位沒有收掉**",
+        "",
+        f"{day[:4]}/{day[4:6]}/{day[6:]} 的 "
+        f"{_SIDE_TEXT.get(record.side, record.side)} {lots} 口 {record.order_code}"
+        + ("" if known else "（委託量，實際成交幾口當時就沒問到）"),
+        "",
+        "**這一口可能還在你帳上**，請確認並自行處理。",
+        "今天照常交易——程式進出等量，不會動到它。",
+        "",
+        "今天若有成交，這筆紀錄會被覆蓋，之後就不會再提醒。",
+    ]
+    return {"content": "\n".join(lines)}
+
+
 def build_entry_too_late_payload(signal: str, ran_at, cutoff, trading_date: date) -> dict:
     """**這班太晚了，所以沒有下單。** 純函式，無 I/O。
 
