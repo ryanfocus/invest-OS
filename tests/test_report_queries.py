@@ -459,6 +459,35 @@ def _fill_rows() -> tuple[str, str]:
     return entry, exit_
 
 
+def _crossing_zero() -> tuple[str, str]:
+    """2026-08-24 跨越零那天的委託與成交查詢（各三列）。
+
+    ⚠️ **不能用 `[21]`（買賣別）分進出場。** 那天是**做空**：進場是 S、
+       出場是 B——與 2026-08-21 做多那天正好相反。用買賣別分的話兩天會
+       互相顛倒，而斷言仍然會過，只是意義整個反了。用委託書號分。
+    """
+    path = os.path.join(os.path.dirname(__file__), "fixtures",
+                        "reports-crossing-zero-2026-08-24.txt")
+    with open(path, encoding="utf-8") as fh:
+        lines = [ln.strip() for ln in fh if ln.startswith("TF,")]
+    order = [ln for ln in lines if len(ln.split(",")) > 55]
+    fulfill = [ln for ln in lines if len(ln.split(",")) <= 55]
+    return CRLF.join(order), CRLF.join(fulfill)
+
+
+def _by_book(text: str, book: str) -> str:
+    return next(r for r in text.splitlines() if r.split(",")[7] == book)
+
+
+CZ_ENTRY_BOOK = "m0193"      # 09:26 賣 1 口，帳上有 1 口反向多單 → 跨越零
+CZ_EXIT_BOOK = "v0702"       # 13:40 買回 1 口，帳上已經是 0
+CZ_REJECTED_BOOK = "00000"   # 08:51 用「新倉」送出，被 980 退單（沒配到書號）
+
+# 倉別欄位的位置在兩份報告裡不同
+POSITION_TYPE_IN_FULFILL = 27
+POSITION_TYPE_IN_ORDER = 33
+
+
 SL_DAY = 20260821
 SL_SEQ = "2315609807637"          # 進場的委託序號
 SL_BOOK = "g0106"                 # 進場的委託書號
@@ -558,21 +587,77 @@ def test_the_price_and_time_each_appear_twice():
         assert f[10] == f[37], "時間出現兩次，值應相同"
 
 
-def test_the_position_type_field_reflects_what_we_sent():
-    """**這是實機里程碑最重要的觀察，但它只是觀察。**
+def test_the_position_type_field_reports_what_the_broker_did_not_what_we_asked():
+    """**倉別欄位反映券商對淨部位實際做了什麼，不是我們請求了什麼。**
 
-    我們送出：進場 `sNewClose=0`（新倉）、出場 `sNewClose=2`（自動）。
-    回報的 `[27]` 分別是 `N` 與 `O`——**送出的值不同，回來的也不同**。
+    2026-08-24 的兩筆送出的是**同一個** `sNewClose=2`（自動），回來卻不同：
 
-    ⚠️ `N`/`O` 的確切含義文件沒寫，是從這兩筆對照推的（最可能 New／Offset）。
-    真正的證據是使用者的帳戶從 2 口變回 1 口——`sNewClose=2` 確實**平了倉**，
-    沒有開出反向新倉。那正是 ticket 06 擔心的失效模式沒有發生。
+        09:26  賣 1 口，帳上有 1 口反向多單  → **O**（平掉使用者的多單）
+        13:40  買 1 口，帳上是 0 口          → **N**（開一口新的還回去）
 
-    這條測試守的是「這個觀察不會被悄悄改掉」，不是「N/O 一定是那個意思」。
+    這是四組樣本裡最關鍵的一組。在它之前只有 2026-08-21 的 N／O 對照，
+    而那天送出的 `sNewClose` 本來就不同（0 與 2），所以「回報的差異
+    來自請求的差異」這個解釋當時無法排除。現在排除掉了。
     """
-    entry, exit_ = _fill_rows()
-    assert entry.split(",")[27] == "N", "進場（sNewClose=0）當時回報的是 N"
-    assert exit_.split(",")[27] == "O", "出場（sNewClose=2）當時回報的是 O"
-    assert entry.split(",")[27] != exit_.split(",")[27], (
-        "**這才是重點**：兩者不同，代表券商沒有把出場也當成新倉"
+    _, fulfill = _crossing_zero()
+    entry = _by_book(fulfill, CZ_ENTRY_BOOK)
+    exit_ = _by_book(fulfill, CZ_EXIT_BOOK)
+    assert entry.split(",")[POSITION_TYPE_IN_FULFILL] == "O", "跨越零的進場記成平倉"
+    assert exit_.split(",")[POSITION_TYPE_IN_FULFILL] == "N", "帳上空手時的出場記成新倉"
+
+
+def test_the_two_reports_agree_on_the_position_type():
+    """委託回報 `[33]` 與成交回報 `[27]` 是同一件事，位置不同。
+
+    位置不同這件事沒有文件，是從真實資料比對出來的。哪天有人把其中一個
+    常數改成另一個的位置，這條會紅。
+    """
+    order, fulfill = _crossing_zero()
+    for book in (CZ_ENTRY_BOOK, CZ_EXIT_BOOK):
+        o = _by_book(order, book).split(",")[POSITION_TYPE_IN_ORDER]
+        f = _by_book(fulfill, book).split(",")[POSITION_TYPE_IN_FULFILL]
+        assert o == f, f"{book} 兩份報告的倉別不一致：委託 {o!r} vs 成交 {f!r}"
+
+
+def test_entry_and_exit_position_types_are_always_opposite():
+    """**進場與出場的倉別必然相反**——兩天四筆都符合。
+
+        進場 N（開了倉）      → 出場必然 O（平掉它）
+        進場 O（平掉別人的）  → 出場必然 N（開一口還回去）
+
+    ⚠️ **兩邊相同代表出了事。** 都是 N 意味著開了兩次——那正是 ticket 06
+       開頭警告的「平倉單被當成新倉，部位不減反增」。
+
+    這條目前只是對著歷史資料的觀察，**程式沒有在執行期檢查它**。
+    要檢查得在出場後再查一次回報（兩次阻塞查詢），而且只有事後才知道。
+    那是一個還沒做的決定，記在 ticket 06。
+    """
+    sl_entry, sl_exit = _fill_rows()
+    _, cz = _crossing_zero()
+    pairs = [
+        ("2026-08-21 做多", sl_entry, sl_exit),
+        ("2026-08-24 做空跨越零",
+         _by_book(cz, CZ_ENTRY_BOOK), _by_book(cz, CZ_EXIT_BOOK)),
+    ]
+    for label, entry, exit_ in pairs:
+        e = entry.split(",")[POSITION_TYPE_IN_FULFILL]
+        x = exit_.split(",")[POSITION_TYPE_IN_FULFILL]
+        assert {e, x} == {"N", "O"}, f"{label}：進場 {e!r}、出場 {x!r}，不是一對相反"
+
+
+def test_a_rejected_order_never_reaches_the_fulfill_report():
+    """**退單的委託不出現在成交回報裡**，所以後備管道不可能把它算成成交。
+
+    08:51 那筆用「新倉」送出、被 980 退單。它在委託回報裡有一列
+    （狀態 6、已成交量 0、旗標 Y、沒有配到委託書號），但成交回報裡沒有。
+
+    ticket 09 的後備管道是拿委託書號去比對成交回報——退單的單既然不在
+    那份資料裡，就不可能被誤算。這是設計上的保護，但在 2026-08-24
+    之前沒有真實樣本佐證。
+    """
+    order, fulfill = _crossing_zero()
+    rejected = _by_book(order, CZ_REJECTED_BOOK)
+    assert rejected.split(",")[31] == "0", "退單的已成交量不是 0"
+    assert CZ_REJECTED_BOOK not in [r.split(",")[7] for r in fulfill.splitlines()], (
+        "退單的委託出現在成交回報裡，後備管道有被誤算的風險"
     )

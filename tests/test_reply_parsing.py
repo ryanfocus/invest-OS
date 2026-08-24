@@ -41,6 +41,102 @@ def _real_rows():
         return [line.strip() for line in fh if line.strip()]
 
 
+_CROSSING_ZERO = os.path.join(os.path.dirname(__file__), "fixtures",
+                              "onnewdata-crossing-zero-2026-08-24.txt")
+
+
+def _crossing_zero_rows():
+    """2026-08-24 跨越零那天 OS 自己送出的四列（進場、出場各一對）。"""
+    with open(_CROSSING_ZERO, encoding="utf-8") as fh:
+        return [ln.strip() for ln in fh
+                if ln.strip() and not ln.startswith("#")]
+
+
+# --- 欄位 [6]：買賣別 ＋ 倉別 ＋ 委託條件的三合一編碼 ---
+#
+# 2026-08-24 發現。它推翻了 2026-08-21 記下的判斷（「要知道券商實際用了
+# 哪種倉別，得在出場後再查一次回報」）——那個資訊一直就在推播裡，
+# 而且在**委託**那一列就到了，不必等成交、不必再查。
+#
+# ⚠️ 這些斷言的期望值來自**交易所回來的資料**，不是我的推導。
+#    七個樣本跨四天、跨「使用者自己下的單」與「OS 送的單」。
+
+_POSITION_CODE = 6
+
+
+def _code(row: str) -> str:
+    return row.split(",")[_POSITION_CODE]
+
+
+def test_the_position_code_encodes_side_then_new_or_offset_then_order_condition():
+    """`SOI10` = 賣出（S）＋ 平倉（O）＋ IOC（I）。"""
+    entry, _, exit_, _ = _crossing_zero_rows()
+    assert _code(entry) == "SOI10", "進場那筆是賣出、平倉（跨越零）、IOC"
+    assert _code(exit_) == "BNI10", "出場那筆是買進、新倉（帳上空手）、IOC"
+
+
+def test_the_position_code_is_the_brokers_answer_not_our_request():
+    """**兩筆送出的都是 `sNewClose=2`（自動），編碼卻不同。**
+
+    我們從來沒有請求過「平倉」——`O` 是券商解析淨部位之後的結論。
+    這是整組樣本裡唯一能排除「回報的差異來自請求的差異」的一組：
+    2026-08-21 那天送出的 `sNewClose` 本來就不同（0 與 2）。
+    """
+    entry, _, exit_, _ = _crossing_zero_rows()
+    assert _code(entry)[1] == "O"
+    assert _code(exit_)[1] == "N"
+    assert _code(entry)[1] != _code(exit_)[1], (
+        "同一個請求值卻得到相同的倉別，那就沒有證據說它是券商的判斷"
+    )
+
+
+def test_the_position_code_arrives_on_the_acknowledgement_not_only_the_fill():
+    """**委託那一列就有倉別**，不必等成交。
+
+    這是「不必再查一次回報」的根據：程式在收到委託回報的那一刻
+    就知道券商把這筆當成新倉還是平倉了。
+    """
+    ack, fill = _crossing_zero_rows()[:2]
+    assert ack.split(",")[2] == "N", "第一列應該是委託回報"
+    assert fill.split(",")[2] == "D", "第二列應該是成交回報"
+    assert _code(ack) == _code(fill), "委託與成交兩列的編碼應該一致"
+
+
+def test_the_users_own_app_order_uses_rod_while_ours_uses_ioc():
+    """第 3 字分得出 ROD 與 IOC —— 免費驗證了 ADR-0003 真的送出 IOC。
+
+    2026-08-17 那筆是使用者在 APP 下的（`BNR20`，R=ROD），
+    我們送的一律是 `I`。這一格哪天變成 R，代表 `sTradeType` 被改掉了，
+    而市價單配 ROD 在群益是不合法的組合。
+    """
+    assert _code(_real_rows()[0])[2] == "R", "使用者 APP 的單是 ROD"
+    for row in _crossing_zero_rows():
+        assert _code(row)[2] == "I", f"OS 送出的單必須是 IOC：{_code(row)}"
+
+
+def test_the_push_and_the_query_agree_on_the_position_type():
+    """**跨格式交叉驗證**：推播 `[6]` 的第 2 字 ⟺ 查詢回報的 `[27]`。
+
+    兩條完全獨立的管道（Solace 推播 vs 請求／回應），格式互不相容，
+    卻對同一筆委託給出同樣的倉別。這是這個編碼含義最強的證據——
+    也是唯一不靠我的推導的證據。
+    """
+    reports = os.path.join(os.path.dirname(__file__), "fixtures",
+                           "reports-crossing-zero-2026-08-24.txt")
+    with open(reports, encoding="utf-8") as fh:
+        fills = [ln.strip() for ln in fh
+                 if ln.startswith("TF,") and len(ln.split(",")) <= 55]
+    by_book = {r.split(",")[7]: r.split(",")[27] for r in fills}
+
+    for row in _crossing_zero_rows():
+        book = row.split(",")[10]
+        if book not in by_book:
+            continue
+        assert _code(row)[1] == by_book[book], (
+            f"{book}：推播說 {_code(row)[1]!r}，查詢回報說 {by_book[book]!r}"
+        )
+
+
 # --- 對著真實資料：欄位位置 ---
 
 
