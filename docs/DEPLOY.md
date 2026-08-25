@@ -214,7 +214,14 @@ state/
 
 `config/settings.yaml` 的 `order.auto_enabled` 是唯一的切換點。開啟之前，
 [ticket 08](../.scratch/os-strategy/issues/08-scheduling-and-deployment.md)
-列的關卡要全部達成。目前的狀態寫在那張票裡。
+列的關卡要全部達成。
+
+✅ **2026-08-25：關卡全部達成。** 那天排程自己跑完一整個交易日——
+08:50 開倉、13:40 平倉、隔日對帳，全程無人介入。這條關卡不再擋著開關。
+
+⚠️ 但**關卡達成不等於策略會賺**。那天虧 663 點。驗收條件從頭到尾問的是
+「排程有沒有正確跑完」，不是「有沒有賺」——兩件事分開看，否則賺錢的日子
+會讓人忽略流程問題，賠錢的日子會讓人去改不該改的東西。
 
 ⚠️ **不可以 commit 開啟的狀態。** 有一條測試守著這件事
 （`test_shipped_config_has_auto_ordering_switched_off`）——臨時開啟做驗證是
