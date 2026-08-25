@@ -579,7 +579,8 @@ class CapitalBroker:
 
         if summary.filled_lots == 0:
             logger.warning("委託 %s 未成交（市價 IOC 當下沒有對手價）", seq)
-        return OrderResult(filled_lots=summary.filled_lots, order_seq=seq)
+        return OrderResult(filled_lots=summary.filled_lots, order_seq=seq,
+                           position_type=summary.position_type)
 
     def get_open_prices(self, expected_trading_day: int | None = None) -> OpenPrices:
         """取三個商品的當日 AM 盤開盤價。

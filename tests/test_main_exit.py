@@ -554,6 +554,64 @@ def test_the_unknown_exit_message_never_prints_a_placeholder_for_missing_lots():
     assert broker.orders == [], "不確定的出場單絕不可以再送一次"
 
 
+# --- 進出場的倉別必須相反 ---
+#
+# 券商每一筆回報都會說它對淨部位做了什麼：開倉（N）或平倉（O）。
+# 早上開了就下午平，早上平掉別人的（跨越零）下午就開一口還回去——
+# **必然相反**。三天的實機資料都是這樣（8/21、8/24、8/25）。
+#
+# 兩邊一樣代表下午那筆**沒有平到任何東西**。最常見的成因是早上那口在盤中
+# 被手動平掉了，於是下午的反向委託開出一個沒人管的新部位——而程式會以為
+# 今天結束了、記 `exited: true`、下班。那一口直接進夜盤。
+#
+# ⚠️ 這是**偵測**不是預防。單已經送出去了，能做的只有讓人當天下午就知道。
+
+
+def test_matching_position_types_raise_the_alarm():
+    """早上開倉、下午也開倉 → 什麼都沒平掉，發告警。"""
+    _, notifier, _ = _run(_record(entry_position_type="N"),
+                          broker=FakeBroker(position_type="N"))
+    assert "沒有平到" in notifier.text, f"沒有發告警：{notifier.text}"
+
+
+def test_opposite_position_types_say_nothing():
+    """一開一平是正常的一天——出場成功本來就不推播。"""
+    _, notifier, _ = _run(_record(entry_position_type="N"),
+                          broker=FakeBroker(position_type="O"))
+    assert notifier.sent == [], f"正常的一天不該有訊息：{notifier.text}"
+
+
+def test_a_record_without_a_recorded_position_type_skips_the_check():
+    """**舊的狀態檔沒有這一格，不可以因此發假警報。**
+
+    這個欄位是 2026-08-25 才加的。在那之前寫下的記錄、以及任何看不懂
+    券商編碼的情況，這一格都是空字串——意思是「不知道」。
+    拿「不知道」去比對只會得到假警報，而假警報會讓人學會忽略這則訊息。
+    """
+    _, notifier, _ = _run(_record(), broker=FakeBroker(position_type="N"))
+    assert notifier.sent == []
+
+
+def test_an_unreadable_exit_position_type_skips_the_check():
+    """下午那筆看不懂時同樣跳過——理由與上一條相同。"""
+    _, notifier, _ = _run(_record(entry_position_type="N"),
+                          broker=FakeBroker(position_type=""))
+    assert notifier.sent == []
+
+
+def test_the_alarm_does_not_pretend_the_exit_failed():
+    """出場**確實成交了**，只是沒平到東西。狀態檔照實記。
+
+    寫成「出場失敗」的話，隔天早上那則「前一日部位沒收掉」的提醒會再發一次——
+    但那一口的方向與狀態檔記的相反，訊息會指著錯的東西叫人去平。
+    """
+    outcome, _, broker = _run(_record(entry_position_type="N"),
+                              broker=FakeBroker(position_type="N"))
+    assert len(broker.orders) == 1, "只送一筆，不重試"
+    assert outcome.exited is True, "單成交了就是出場了"
+    assert read_position(path=state_path()).exited is True
+
+
 # ─────────────────────────────────────────────────────────
 # 出場那班的結局規則：**有東西要講 ⟺ 非零結束碼**
 # ─────────────────────────────────────────────────────────

@@ -60,6 +60,7 @@ class FakeBroker:
         contracts: dict | None = None,
         contracts_error: Exception | None = None,
         order_error: Exception | None = None,
+        position_type: str = "",
         fills: list | None = None,
         query_result: object = _UNSET,
     ):
@@ -68,6 +69,9 @@ class FakeBroker:
         self._script = list(script) if script is not None else None
         self._quotes = quotes
         self._login_error = login_error
+        # 券商回報的倉別。預設空字串＝「不知道」，與真實的『看不懂』一致——
+        # 想測倉別檢查的測試必須自己寫明，那件事因此在測試碼裡看得見。
+        self._position_type = position_type
         self._contracts = contracts if contracts is not None else {
             code: ContractInfo(code=code, last_trading_day=20260819) for code in PRODUCT_CODES
         }
@@ -136,7 +140,9 @@ class FakeBroker:
             filled = request.lots
         else:
             filled = self._fills[0] if len(self._fills) == 1 else self._fills.pop(0)
-        return OrderResult(filled_lots=filled, order_seq=f"FAKE{len(self.orders):09d}")
+        return OrderResult(filled_lots=filled,
+                           order_seq=f"FAKE{len(self.orders):09d}",
+                           position_type=self._position_type)
 
     def query_filled_lots(self, *, order_seq, trading_day, requested_lots, sleep=None):
         """後備管道：主動問券商主機成交幾口。回 `None` 代表還是不知道。

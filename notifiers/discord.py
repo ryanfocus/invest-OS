@@ -70,6 +70,38 @@ def build_order_failed_payload(reason: str, trading_date: date) -> dict:
     return {"content": "\n".join(lines)}
 
 
+_POSITION_TEXT = {"N": "新倉", "O": "平倉"}
+
+
+def build_exit_did_not_offset_payload(record, exit_type: str, trading_date: date) -> dict:
+    """**下午那筆沒有平到倉。** 純函式，無 I/O。
+
+    券商每一筆回報都會說它對淨部位做了什麼（新倉／平倉）。早上開了就下午平、
+    早上平掉使用者的部位（跨越零）就下午開一口還回去——**必然相反**。
+    兩邊一樣代表下午那筆碰不到早上那口，於是開出一個沒人管的新部位。
+
+    最常見的成因：早上那口在盤中被手動平掉了。
+
+    ⚠️ 說「很可能」不說「一定」：程式看不到帳戶，它只知道兩個回報欄位不對勁。
+    台指期是淨額計算，帳上實際剩什麼還牽涉到使用者自己的部位。
+    把話說死，錯一次使用者就不會再信這則訊息了。
+    """
+    side = _SIDE_TEXT.get(record.side, record.side)
+    back = _SIDE_TEXT.get(record.exit_side, record.exit_side)
+    lots = record.lots if record.lots is not None else record.requested_lots
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "🚨 **下午那筆沒有平到倉**",
+        "",
+        f"早上 {side} {lots} 口 → 券商記「{_POSITION_TEXT.get(record.entry_position_type, record.entry_position_type)}」",
+        f"下午 {back} {lots} 口 → 券商記「{_POSITION_TEXT.get(exit_type, exit_type)}」",
+        "",
+        f"兩筆一樣，代表下午沒平到早上那口。帳上很可能多一口沒人管的 {record.order_code}，"
+        "而今天已經沒有排程會處理它了——請自行確認並平掉。",
+    ]
+    return {"content": "\n".join(lines)}
+
+
 def build_stale_position_payload(record, trading_date: date) -> dict:
     """**前一個交易日的部位沒有收掉。** 純函式，無 I/O。
 

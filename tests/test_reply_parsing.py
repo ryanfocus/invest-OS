@@ -25,7 +25,7 @@
 
 import os
 
-from broker.capital_wire import parse_reply_row
+from broker.capital_wire import parse_reply_row, summarize_fills
 
 _FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures",
                         "onnewdata-real-2026-08-17.txt")
@@ -135,6 +135,40 @@ def test_the_push_and_the_query_agree_on_the_position_type():
         assert _code(row)[1] == by_book[book], (
             f"{book}：推播說 {_code(row)[1]!r}，查詢回報說 {by_book[book]!r}"
         )
+
+
+# --- 解析器把倉別讀出來（2026-08-25 新增）---
+
+
+def test_the_parser_exposes_the_position_type():
+    """`parse_reply_row` 讀得出券商說它做了什麼：開倉（N）或平倉（O）。
+
+    這是「進出場的倉別必須相反」那個檢查的原料。在它之前這個欄位只被
+    fixture 的說明記著，沒有任何程式讀它。
+    """
+    entry, _, exit_, _ = _crossing_zero_rows()
+    assert parse_reply_row(entry).position_type == "O"
+    assert parse_reply_row(exit_).position_type == "N"
+
+
+def test_an_unreadable_position_code_becomes_empty_not_a_guess():
+    """看不懂就回空字串，**不可以猜**。
+
+    空字串的意思是「不知道」，而上層對「不知道」的處理是**跳過檢查**——
+    猜一個值的話，那個檢查會拿假資料去比對，然後發出假警報或漏掉真的問題。
+    兩種都比不檢查更糟。
+    """
+    entry = _crossing_zero_rows()[0].split(",")
+    for broken in ("", "S", "XYZ10", "SQI10"):
+        entry[6] = broken
+        assert parse_reply_row(",".join(entry)).position_type == "", broken
+
+
+def test_the_summary_carries_the_position_type_of_the_fill():
+    """彙整要把倉別帶出來——上層拿到的是 `FillSummary`，不是原始列。"""
+    rows = _crossing_zero_rows()
+    seq = rows[0].split(",")[0]
+    assert summarize_fills(rows, seq).position_type == "O"
 
 
 # --- 對著真實資料：欄位位置 ---

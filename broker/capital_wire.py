@@ -121,6 +121,17 @@ _NEW_CLOSE_BY_INTENT = {ENTRY: 2, EXIT: 2}
 # 去識別化的樣本存在 tests/fixtures/onnewdata-real-2026-08-17.txt，
 # tests/test_reply_parsing.py 對著它斷言。
 _REPLY_KEYNO, _REPLY_MARKET, _REPLY_TYPE, _REPLY_ERR, _REPLY_QTY = 0, 1, 2, 3, 20
+
+# 倉別在推播裡：欄位 [6] 是三合一編碼「買賣別 ＋ 倉別 ＋ ROD/IOC」，
+# 例 `SOI10` = 賣出、平倉、IOC。第 2 個字才是倉別。
+#
+# ⚠️ **這是券商解析淨部位之後的結論，不是我們送出的 `sNewClose`。**
+#    2026-08-24 的兩筆送出的都是「自動」，回來卻分別是 O 與 N。
+#
+# 七個樣本（2026-08-17／19／21／24）與查詢回報的 `[27]` 全部一致，
+# 樣本存在 tests/fixtures/onnewdata-crossing-zero-2026-08-24.txt。
+_REPLY_POSITION_CODE = 6
+_POSITION_NEW, _POSITION_OFFSET = "N", "O"
 _MARKET_FUTURES_REPLY = "TF"
 _REPLY_TYPES = frozenset("NCUPDBS")     # N委託 C取消 U改量 P改價 D成交 B改價改量 S動態退單
 _REPLY_FILLED = "D"        # 成交
@@ -249,6 +260,9 @@ class ReplyRow:
     type: str
     failed: bool
     qty: int
+    # 券商說這筆對淨部位做了什麼：N 開倉、O 平倉。**看不懂時是空字串**——
+    # 空的意思是「不知道」，上層要跳過檢查而不是拿它去比對。
+    position_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -271,6 +285,8 @@ class FillSummary:
     matched_rows: int
     saw_cancel: bool = False
     reject_reason: str = ""
+    # 券商說這筆對淨部位做了什麼（N 開倉／O 平倉）。看不懂時是空字串。
+    position_type: str = ""
 
     def is_settled(self, requested_lots: int) -> bool:
         """這筆委託確定不會再有成交了嗎？
@@ -316,11 +332,17 @@ def parse_reply_row(row: str) -> ReplyRow | None:
     if not qty.isdigit():
         return None
 
+    code = (fields[_REPLY_POSITION_CODE].strip()
+            if len(fields) > _REPLY_POSITION_CODE else "")
+    position = code[1] if len(code) > 1 and code[1] in (_POSITION_NEW,
+                                                        _POSITION_OFFSET) else ""
+
     return ReplyRow(
         seq=fields[_REPLY_KEYNO].strip() or fields[-1].strip(),
         type=row_type,
         failed=fields[_REPLY_ERR].strip() == "Y",
         qty=int(qty),
+        position_type=position,
     )
 
 
@@ -363,6 +385,7 @@ def summarize_fills(rows, seq: str) -> FillSummary:
     matched = 0
     reject_reason = ""
     saw_cancel = False
+    position = ""
 
     for row in rows:
         parsed = parse_reply_row(row)
@@ -373,6 +396,9 @@ def summarize_fills(rows, seq: str) -> FillSummary:
         matched += 1
         if parsed.failed and not reject_reason:
             reject_reason = row
+        if not position:
+            # 委託（N）那一列就有了，不必等成交——這也是「不必再查一次回報」的根據。
+            position = parsed.position_type
         if parsed.type == _REPLY_FILLED:
             filled += parsed.qty
         elif parsed.type == _REPLY_CANCELLED:
@@ -385,6 +411,7 @@ def summarize_fills(rows, seq: str) -> FillSummary:
         matched_rows=matched,
         saw_cancel=saw_cancel,
         reject_reason=reject_reason if filled == 0 else "",
+        position_type=position,
     )
 
 

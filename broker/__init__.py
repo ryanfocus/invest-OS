@@ -234,6 +234,14 @@ class OrderResult:
 
     filled_lots: int
     order_seq: str = ""     # 群益的 13 碼委託序號，供對帳與人工查詢
+    # 券商說這筆對淨部位做了什麼：`N` 新倉、`O` 平倉，**看不懂時是空字串**。
+    #
+    # 這不是我們送出的 `sNewClose`——2026-08-24 那天進出場送的都是「自動」，
+    # 回來卻分別是 O 與 N。它是券商看過帳上部位之後的結論。
+    #
+    # 用途：進場與出場的這一格**必然相反**（開了就要平、平掉別人的就要開回去）。
+    # 兩邊一樣代表下午那筆沒平到任何東西，帳上多一口沒人管的部位。
+    position_type: str = ""
 
 
 def build_open_prices(quotes: dict, expected_trading_day: int | None = None) -> OpenPrices:

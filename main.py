@@ -63,6 +63,7 @@ from state import (
 )
 from notifiers.discord import (
     build_exit_blocked_payload,
+    build_exit_did_not_offset_payload,
     build_exit_failed_payload,
     build_exit_state_broken_payload,
     build_exit_unknown_payload,
@@ -269,6 +270,8 @@ def _place_entry_order(
             # 現在寫下來，13:40 就不必再連一次報價主機去查商品清單。
             last_trading_day=contract.last_trading_day,
             order_seq=result.order_seq,
+            # 下午出場後要拿它跟出場那筆比對，見 `state.PositionRecord`
+            entry_position_type=result.position_type,
         ),
         path=state_path,
     )
@@ -931,6 +934,28 @@ def run_exit(
 
     logger.info("出場完成，平掉 %d 口", result.filled_lots)
     write_position(replace(record, exited=True, close_reason=BY_EXIT), path=state_path)
+
+    # **進場與出場的倉別必然相反。** 早上開了就下午平；早上平掉使用者的部位
+    # （跨越零）就下午開一口還回去。一樣代表下午那筆**碰不到早上那口**——
+    # 最常見的成因是它在盤中被手動平掉了，於是這筆反向委託開出一個新部位。
+    #
+    # ⚠️ 這是**偵測不是預防**：單已經送出去了。能做的只有讓人當天下午就知道，
+    #    而不是隔天早上才發現帳上多一口。
+    #
+    # ⚠️ 空字串是「不知道」（舊的狀態檔、看不懂的編碼），**跳過檢查**。
+    #    拿「不知道」去比對只會得到假警報，而假警報會讓人學會忽略這則訊息。
+    #
+    # 狀態檔照實記成已出場：那筆單**確實成交了**。寫成失敗的話，隔天早上
+    # 那則「前一日部位沒收掉」的提醒會指著方向相反的東西叫人去平。
+    if (record.entry_position_type and result.position_type
+            and record.entry_position_type == result.position_type):
+        reason = (f"出場沒有平到倉：早上與下午的倉別都是 "
+                  f"{result.position_type}，帳上可能多一口沒人管的部位")
+        logger.error("%s", reason)
+        return _finish(
+            build_exit_did_not_offset_payload(record, result.position_type, today),
+            remaining=0, exited=True, failure=reason)
+
     # 例行出場不發 Discord——使用者要求每天只有一則訊息（早上那則訊號）。
     return _finish(remaining=0, exited=True)
 
