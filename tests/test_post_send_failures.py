@@ -16,7 +16,7 @@ import os
 
 import pytest
 
-from broker import BUY, ENTRY, FillUnknown, MTX_CODE, OrderFailed, OrderRequest
+from broker import BUY, FillUnknown, MTX_CODE, OrderFailed, OrderRequest
 from broker.capital import CapitalBroker
 
 # 正式的 logs/ 路徑，在 conftest 的 fixture 導開之前就先算好——
@@ -66,7 +66,7 @@ def test_saving_a_reply_never_touches_the_real_logs_directory():
 
 REQUEST = OrderRequest(
     product=MTX_CODE, order_code="MTX08", contract_month="202608",
-    side=BUY, lots=1, intent=ENTRY,
+    side=BUY, lots=1,
 )
 
 

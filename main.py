@@ -24,8 +24,6 @@ from datetime import date, datetime, time as clock
 import strategy
 from broker import (
     BUY,
-    ENTRY,
-    EXIT,
     SELL,
     FillUnknown,
     LoginFailed,
@@ -191,7 +189,6 @@ def _place_entry_order(
         contract_month=contract.contract_month,
         side=side,
         lots=config.order_lots,
-        intent=ENTRY,
     )
     logger.info("送出委託 %s（%s）%s %d 口 %s",
                 request.order_code, request.product, request.side,
@@ -868,7 +865,6 @@ def run_exit(
         contract_month=record.contract_month,
         side=record.exit_side,
         lots=record.lots,
-        intent=EXIT,
     )
     # 結算日在上面就回去了，走到這裡一定是一般交易日。
     attempts = config.quote_retry_attempts

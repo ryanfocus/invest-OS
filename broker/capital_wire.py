@@ -47,8 +47,6 @@ from dataclasses import dataclass
 
 from broker import (
     BUY,
-    ENTRY,
-    EXIT,
     PRODUCT_CODES,
     ContractInfo,
     OrderRequest,
@@ -100,8 +98,12 @@ _MARKET_PRICE = "M"        # bstrPrice：「M」市價、「P」範圍市價；�
 # ⚠️ **進場的「自動」尚未實機驗證。** 今天證明的是「新倉」會被拒，
 #    不是「自動」會成功——那是兩件事。
 #
-# 📌 `intent` 目前只影響這張表，而表的兩格已經一樣了。保留它是因為
-#    那兩筆委託的用途本來就不同，而且出場那格的取捨（見下）隨時可能再分岔。
+# 📌 **這裡曾經是一張 `{ENTRY: …, EXIT: …}` 的對照表**，而 `OrderRequest`
+#    為它帶著一個 `intent` 欄位。兩格變成一樣之後那個欄位就不影響任何東西，
+#    2026-08-25 一併拿掉。
+#
+#    要讓兩邊再分岔的話，得重新加回那個參數——而那是一個看得見的動作。
+#    上一次不刻意的分岔（進場 0、出場 2）花了三次實機測試才發現。
 #
 # ── 出場 = 2（自動）的理由（2026-08-21 實機確認過同方向那一半）──
 #
@@ -113,7 +115,7 @@ _MARKET_PRICE = "M"        # bstrPrice：「M」市價、「P」範圍市價；�
 #   ✅ 2026-08-21：帳上 2 口多單時送「自動」賣 1 口，成交，帳戶回到 1 口，
 #      成交回報倉別欄位是 `O`（不是 `N`）——券商沒把它當新倉。
 #   ⚠️ 但那次**沒有跨越零**，而跨越零正是選「自動」的唯一理由。
-_NEW_CLOSE_BY_INTENT = {ENTRY: 2, EXIT: 2}
+_NEW_CLOSE_AUTO = 2
 
 
 # OnNewData 的欄位位置。**2026-08-17 實機驗證通過**——監聽整個交易日收到兩則
@@ -247,7 +249,7 @@ def build_future_order_fields(request: OrderRequest, account: str) -> dict:
         "sTradeType": _TRADE_TYPE_IOC,
         "nQty": request.lots,
         "sDayTrade": _DAY_TRADE_NO,
-        "sNewClose": _NEW_CLOSE_BY_INTENT[request.intent],
+        "sNewClose": _NEW_CLOSE_AUTO,
         "sReserved": _SESSION_INTRADAY,
     }
 

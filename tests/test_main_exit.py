@@ -18,7 +18,7 @@ from datetime import date
 
 import pytest
 
-from broker import BUY, EXIT, MTX_CODE, SELL
+from broker import BUY, MTX_CODE, SELL
 from broker.fake import FakeBroker
 from conftest import ON_TIME, RecordingNotifier, make_config, observations_path, state_path
 from main import run_exit
@@ -95,12 +95,6 @@ def test_exit_uses_the_order_code_from_the_state_file():
     _, _, broker = _run(_record())
     assert broker.orders[0].order_code == "MTX08"
     assert broker.orders[0].contract_month == "202608"
-
-
-def test_exit_order_is_marked_as_an_exit():
-    """倉別由 intent 決定，而進出場的正確值不一樣（見 test_order_fields.py）。"""
-    _, _, broker = _run(_record())
-    assert broker.orders[0].intent == EXIT
 
 
 def test_a_successful_exit_is_recorded():

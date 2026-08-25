@@ -101,14 +101,6 @@ class FillUnknown(BrokerError):
 BUY = "BUY"
 SELL = "SELL"
 
-# 委託意圖：這筆單是要**開**部位還是**平**部位。
-#
-# 它決定群益的倉別參數（`sNewClose`），而那個參數兩邊的正確值不一樣——
-# 進場與出場是**兩個獨立的未知數**，進場驗過不代表出場的填法就對。
-# 對應規則與理由見 `broker.capital.build_future_order_fields`。
-ENTRY = "ENTRY"
-EXIT = "EXIT"
-
 
 def to_yyyymmdd(day) -> int:
     """`date` → `20260810`。群益的日期欄位都是這個整數格式。"""
@@ -204,10 +196,11 @@ class OrderRequest:
     contract_month: str     # yyyymm
     side: str               # BUY / SELL
     lots: int
-    # ENTRY / EXIT —— 決定倉別，而兩邊的正確值不同。
-    # ⚠️ 刻意**沒有預設值**：忘了填就靜默變成新倉，而那正是
-    #    「平倉單被當成新倉，部位不減反增」那個失效模式。
-    intent: str
+
+    # 📌 **這裡曾經有一個 `intent`（ENTRY／EXIT）欄位**，用來決定群益的倉別
+    #    參數。2026-08-24 實測之後進出場都改成「自動」，那張對照表的兩格
+    #    變成一樣，`intent` 就不再影響任何東西了——2026-08-25 拿掉。
+    #    倉別的完整實測記錄在 `broker.capital_wire` 的 `_NEW_CLOSE_AUTO`。
 
     def __post_init__(self) -> None:
         """空的下單代碼絕不可以送到券商。
@@ -220,8 +213,6 @@ class OrderRequest:
             raise ValueError(f"{self.product} 沒有下單代碼，無法送出委託")
         if self.lots < 1:
             raise ValueError(f"委託口數必須 ≥ 1，目前是 {self.lots}")
-        if self.intent not in (ENTRY, EXIT):
-            raise ValueError(f"intent 必須是 {ENTRY} 或 {EXIT}，目前是 {self.intent!r}")
 
 
 @dataclass(frozen=True)
