@@ -15,12 +15,26 @@
 用錯大小不會報錯——`nOpen` 在 offset 128 以下，**價格看起來完全正常**。
 
 所以打包版每次啟動前要把舊的說明書丟掉，讓它照對方的 dll 重新產生。
+
+## ⚠️ 這個檔案不符合本專案的測試慣例，破例的理由如下
+
+SPEC 寫著「測試一律從最上層的進場／出場流程打進去」。這裡直接呼叫一個
+模組層函式，不走那條路。
+
+破例的理由與 `test_post_send_failures.py` 同一類：`discard_generated_com_wrapper`
+只在 `sys.frozen` 為真、而且 `import comtypes.client` 成功之後才會被呼叫——
+假 broker 打不到那條路，真 broker 在沒有 COM 的機器上連 import 都不會成功。
+從最上層打進來只能證明「沒有呼叫它」，證不了「它做對了」。
+
+⚠️ **破例的範圍僅限這一個函式。** 它是純檔案操作，沒有 COM、沒有網路、
+   沒有狀態——測得起來也測得準。任何需要真的 COM 的東西仍然不寫測試。
 """
 
 import os
 
 import pytest
 
+from broker import LoginFailed
 from broker.capital import discard_generated_com_wrapper
 
 
@@ -72,6 +86,9 @@ def test_a_wrapper_that_cannot_be_removed_stops_the_program(tmp_path, monkeypatc
         raise PermissionError("檔案被鎖住")
 
     monkeypatch.setattr(os, "remove", _refuse)
-    with pytest.raises(Exception) as exc:
+    # 斷言型別而不是訊息字串：上層靠 `LoginFailed` 決定要發哪一則 Discord，
+    # 那才是可觀察的契約。改成別的例外型別的話，`run_entry` 的
+    # `except LoginFailed` 接不到，整班會以 traceback 結束、一則通知都不發。
+    with pytest.raises(LoginFailed) as exc:
         discard_generated_com_wrapper(str(d))
-    assert "SKCOMLib.py" in str(exc.value) or "說明書" in str(exc.value)
+    assert "SKCOMLib.py" in str(exc.value), "訊息要指出是哪一個檔案丟不掉"

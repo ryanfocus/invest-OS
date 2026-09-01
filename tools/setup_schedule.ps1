@@ -38,7 +38,6 @@ $ErrorActionPreference = 'Stop'
 # 默默壞掉，而這套系統唯一的故障偵測是「早上沒收到 Discord」。
 $Packaged = Test-Path (Join-Path $PSScriptRoot 'osmain.exe')
 if ($Packaged) { $Root = $PSScriptRoot } else { $Root = Split-Path -Parent $PSScriptRoot }
-$Root = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
 $LogDir = Join-Path $Root 'logs'
 
@@ -61,6 +60,11 @@ function Show-Jobs {
 
 if ($Show) {
     Write-Host "`n=== 目前的排程 ===" -ForegroundColor Cyan
+    # 把判斷結果印出來。排查「排程好像跑錯地方」時第一個要看的就是它，
+    # 而且這讓上面那個分支變得驗得到——2026-09-01 那個分支曾經是死碼
+    # （舊的 $Root 賦值沒刪，無條件蓋掉判斷結果），而 -Show 剛好看不出來。
+    $shape = if ($Packaged) { "交付包" } else { "開發" }
+    Write-Host "  形狀：$shape    根目錄：$Root" -ForegroundColor DarkGray
     Show-Jobs
     return
 }
@@ -86,7 +90,8 @@ $Runner = Join-Path $PSScriptRoot 'run_stage.cmd'
 if (-not (Test-Path $Runner)) { throw "找不到 $Runner" }
 
 foreach ($job in $Jobs) {
-    # 實際執行的是 tools\run_stage.cmd——它自己算當天的日誌檔名。
+    # 實際執行的是 run_stage.cmd（開發在 tools\，交付包在最外層）——
+    # 它自己算當天的日誌檔名。
     # 排程的參數是建立時就固定的字串，在這裡算日期會讓每天都寫進同一個檔。
     $action = New-ScheduledTaskAction -Execute $Runner -Argument $job.Stage -WorkingDirectory $Root
     $trigger = New-ScheduledTaskTrigger -Daily -At $job.Time

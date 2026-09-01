@@ -134,20 +134,34 @@ $problems = @()
 if (Test-Path (Join-Path $Bundle '.env')) { $problems += '交付包裡有 .env（期貨帳密）' }
 
 $settings = Join-Path $Bundle 'config\settings.yaml'
-$armed = Select-String -Path $settings -Pattern '^\s*auto_enabled:\s*true' -Quiet
+# YAML 的「真」不只有 true。settings.py 自己的註解就寫過：yes / on / True 都是 True。
+# 只擋 true 的話，寫成 on 就整包帶著開著的開關出貨。
+$armed = Select-String -Path $settings -Pattern '^\s*auto_enabled:\s*(true|yes|on)\s*(#.*)?$' -Quiet
 if ($armed) { $problems += 'settings.yaml 的自動下單是開著的' }
 
 # 出貨的口數必須是 1。這裡取的是版控裡那份，而版控裡那份會跟著開發時的
 # 實驗跑（有人為了測試改成 2 又順手 commit 了）。對方拿到之後只要一開開關
 # 就是那個口數的真單——不能讓它從我們的實驗值繼承過去。
-$lots = (Select-String -Path $settings -Pattern '^\s*lots:\s*(\d+)').Matches.Groups[1].Value
-if ($lots -ne '1') {
-    $problems += "settings.yaml 的口數是 $lots，出貨必須是 1（請先把版控裡那份改回來）"
+# 抓不到時**不可以拋例外**。無匹配時 .Matches.Groups[1] 會擲 RuntimeException，
+# 而 $ErrorActionPreference='Stop' 之下腳本當場中止——下面那個「檢查沒過就刪掉產物」
+# 根本輪不到執行，半成品留在磁碟上，正好與檔頭寫的「不留半成品」相反。
+$lotsHits = @(Select-String -Path $settings -Pattern '^\s*lots:\s*(\d+)')
+if ($lotsHits.Count -ne 1) {
+    $problems += "settings.yaml 裡找到 $($lotsHits.Count) 行 lots:，預期剛好 1 行"
+} elseif ($lotsHits[0].Matches.Groups[1].Value -ne '1') {
+    $problems += "settings.yaml 的口數是 $($lotsHits[0].Matches.Groups[1].Value)，出貨必須是 1"
 }
 
 # 中文說明有沒有在複製過程中被毀掉。那些說明是這個檔案的一半價值。
 if (-not (Select-String -Path $settings -Pattern '自動下單總開關' -Quiet)) {
     $problems += 'settings.yaml 的中文說明壞掉了（編碼問題？）'
+}
+
+# 該在的東西在不在。run_stage.cmd 特別重要——**每日日誌完全來自它的 >> 重導向**，
+# 程式裡沒有任何 FileHandler。少了它，排程照樣跑、照樣下單，但一個字都不會留下，
+# 而唯一的故障偵測是「早上沒收到 Discord」，那不會為「有跑但跑歪」觸發。
+foreach ($f in 'osmain.exe', 'run_stage.cmd', 'setup_schedule.ps1', 'README.md', '.env.example', 'config\settings.yaml') {
+    if (-not (Test-Path (Join-Path $Bundle $f))) { $problems += "交付包裡少了 $f" }
 }
 
 foreach ($d in 'logs', 'state') {
@@ -169,10 +183,17 @@ $envFile = Join-Path $Root '.env'
 if (Test-Path $envFile) {
     $full = @(); $prefix = @()
     foreach ($line in Get-Content $envFile) {
-        if ($line -match '^\s*(CAPITAL_USER_ID|CAPITAL_FUTURES_ACCOUNT)\s*=\s*(.+?)\s*$') {
+        # 四個都要掃。只掃帳號不掃密碼與 webhook，與檔頭「.env 是可以直接下單的期貨帳密」
+        # 那句話不符——漏掉的那兩個才是真正能直接拿去用的。
+        if ($line -match '^\s*(CAPITAL_USER_ID|CAPITAL_PASSWORD|CAPITAL_FUTURES_ACCOUNT|DISCORD_WEBHOOK_URL)\s*=\s*(.+?)\s*$') {
             $v = $Matches[2]
             if ($v.Length -ge 8) { $full += $v }
-            if ($v.Length -ge 4) { $prefix += $v.Substring(0, 4) }
+            # ⚠️ **前綴只對期貨帳號有意義。** 那 4 碼是分公司代碼，是識別的那一段。
+            #    對密碼取前 4 碼、對 webhook 取到 'http'，撞到設定檔是必然的
+            #    （實測就撞了）。而誤報的代價是讓人習慣忽略這道檢查。
+            if ($Matches[1] -eq 'CAPITAL_FUTURES_ACCOUNT' -and $v.Length -ge 4) {
+                $prefix += $v.Substring(0, 4)
+            }
         }
     }
     $allFiles = Get-ChildItem $Bundle -Recurse -File
