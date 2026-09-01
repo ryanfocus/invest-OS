@@ -15,18 +15,32 @@
 
 import io
 import pathlib
+import subprocess
 
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-_SKIP_DIRS = {".venv", "__pycache__", "build", "dist", ".git"}
 
 
 def _python_files():
-    for path in sorted(ROOT.rglob("*.py")):
-        if not _SKIP_DIRS.isdisjoint(path.parts):
-            continue
-        yield path
+    """**版控裡的 .py，就這些。**
+
+    原本是走檔案系統再排除幾個目錄名，而那份清單漏掉了 `deploy/` 底下的
+    建置產物——裡面有一整套 Python 直譯器，掃它只會掃出別人的問題。
+
+    改用 `git ls-files` 之後，「要守哪些檔案」與「哪些檔案進版控」變成同一件事，
+    不必再維護第二份排除清單（而那份清單漏掉的那天，這條測試就開始亂報）。
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "*.py"],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+    )
+    if out.returncode != 0:
+        pytest.skip("這裡不是 git 工作區，無法決定哪些檔案該守")
+    for name in out.stdout.splitlines():
+        path = ROOT / name
+        if path.is_file():
+            yield path
 
 
 def test_no_code_refers_to_a_name_that_does_not_exist():

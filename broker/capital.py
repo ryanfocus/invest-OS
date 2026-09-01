@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 import winreg
 
@@ -97,6 +98,47 @@ def _resolve_dll_path() -> str:
             "SKCOM 元件尚未註冊。請依 docs/LOGIN_SETUP.md Step 4，"
             "以系統管理員身分執行 C:\\SKCOM\\install.bat"
         ) from exc
+
+
+# `comtypes.gen` 這個套件本身，不是產生出來的說明書
+_WRAPPER_PACKAGE_MARKER = "__init__.py"
+
+
+def discard_generated_com_wrapper(directory: str) -> None:
+    """丟掉上次產生的 SKCOM 介面定義，**逼它照這台機器的 dll 重新產生一份**。
+
+    只有打包版需要這件事。一般執行時 comtypes 自己會比對 dll 的檔案時間，
+    不合就重新產生——但那段檢查在打包版是關掉的：
+
+        # comtypes/_tlib_version_checker.py
+        if not hasattr(sys, "frozen"):      # ← 打包後整段跳過
+            ...
+            raise ImportError("Typelib different than module")
+
+    ⚠️ **丟不掉就要拋例外，不可以安靜地繼續。**
+       這與 `housekeeping.purge_old_logs`「絕不拋例外」刻意相反。
+       清日誌失敗只是佔磁碟；帶著舊說明書繼續跑，代表可能拿對方機器的元件
+       去填一個照**我們**機器格式配置的緩衝區——實測過 `SKSTOCKLONG`
+       在 2.13.42 是 128 bytes、2.13.58 是 144 bytes，而取開盤價
+       (`SKQuoteLib_GetStockByNoLONG`) 正是由元件寫入那個緩衝區的呼叫。
+       用錯大小不會報錯，`nOpen` 在 offset 128 以下，**價格看起來完全正常**。
+
+       拋出去會被上層接住並發 Discord，那天不交易——那是可以接受的。
+       安靜地用錯的格式交易不是。
+    """
+    if not os.path.isdir(directory):
+        return                              # 第一次執行，本來就還沒有
+    for name in sorted(os.listdir(directory)):
+        if name == _WRAPPER_PACKAGE_MARKER or not name.endswith(".py"):
+            continue
+        try:
+            os.remove(os.path.join(directory, name))
+        except OSError as exc:
+            raise LoginFailed(
+                f"丟不掉舊的 SKCOM 說明書（{name}）：{exc}。"
+                "不確定它是不是照這台機器的元件產生的，因此不繼續——"
+                "請關掉所有正在執行的本程式後重試。"
+            ) from exc
 
 
 class _ReplyEvents:
@@ -223,6 +265,12 @@ class CapitalBroker:
             return
 
         import comtypes.client
+
+        if getattr(sys, "frozen", False):
+            # 打包版：每次都重新產生介面定義。成本約 0.1 秒，換掉的是
+            # 「拿別台機器的格式去讀這台的開盤價」那個無聲的錯誤。
+            # 理由見 `discard_generated_com_wrapper`。
+            discard_generated_com_wrapper(comtypes.client.gen_dir)
 
         comtypes.client.GetModule(_resolve_dll_path())
         import comtypes.gen.SKCOMLib as sk

@@ -16,8 +16,9 @@ import os
 from dataclasses import dataclass
 
 import yaml
+import paths
 
-_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ROOT = paths.app_root()
 _SETTINGS_PATH = os.path.join(_ROOT, "config", "settings.yaml")
 _ENV_PATH = os.path.join(_ROOT, ".env")
 

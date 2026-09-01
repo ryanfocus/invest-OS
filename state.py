@@ -20,10 +20,11 @@ import logging
 import os
 import tempfile
 from dataclasses import asdict, dataclass, fields
+import paths
 
 logger = logging.getLogger(__name__)
 
-_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ROOT = paths.app_root()
 STATE_PATH = os.path.join(_ROOT, "state", "position.json")
 
 

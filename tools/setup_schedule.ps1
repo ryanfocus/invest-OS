@@ -9,6 +9,8 @@
 #     .\tools\setup_schedule.ps1 -Show        只看現況，不改東西
 #     .\tools\setup_schedule.ps1 -Remove      全部移除
 #
+#     交付包裡這個腳本在最外層，用法一樣，路徑少一層 tools\
+#
 # ⚠️ **排程不管自動下單的開關。** 兩班一律每天叫起來，由程式自己讀
 #    config/settings.yaml 決定要不要下單：
 #      開關開 → 進場下單、出場平倉
@@ -27,6 +29,15 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# 這個腳本要在兩種形狀下都能用：
+#
+#   開發：invest-os\tools\setup_schedule.ps1  → 跑 .venv 裡的 python
+#   交付：invest-os\setup_schedule.ps1        → 跑旁邊的 osmain.exe
+#
+# 做成一份而不是兩份，是因為兩份會漂——而漂掉的那份會在使用者的機器上
+# 默默壞掉，而這套系統唯一的故障偵測是「早上沒收到 Discord」。
+$Packaged = Test-Path (Join-Path $PSScriptRoot 'osmain.exe')
+if ($Packaged) { $Root = $PSScriptRoot } else { $Root = Split-Path -Parent $PSScriptRoot }
 $Root = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
 $LogDir = Join-Path $Root 'logs'
@@ -66,7 +77,7 @@ if ($Remove) {
     return
 }
 
-if (-not (Test-Path $Python)) {
+if (-not $Packaged -and -not (Test-Path $Python)) {
     throw "找不到 $Python —— 虛擬環境還沒建立？請看 docs/DEPLOY.md"
 }
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }

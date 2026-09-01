@@ -29,10 +29,11 @@ from __future__ import annotations
 import logging
 import os
 import time
+import paths
 
 logger = logging.getLogger(__name__)
 
-_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ROOT = paths.app_root()
 LOGS_PATH = os.path.join(_ROOT, "logs")
 
 # 保留天數。2026-08-21 與使用者確認。

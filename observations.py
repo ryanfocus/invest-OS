@@ -25,10 +25,11 @@ from dataclasses import asdict, dataclass, fields
 
 # `strategy` 不 import 任何專案內模組，所以放在頂層不會有循環依賴。
 from strategy import LONG, NO_TRADE, SHORT
+import paths
 
 logger = logging.getLogger(__name__)
 
-_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ROOT = paths.app_root()
 OBSERVATIONS_PATH = os.path.join(_ROOT, "state", "observations.jsonl")
 
 
