@@ -86,6 +86,22 @@ if (-not $Packaged -and -not (Test-Path $Python)) {
 }
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir | Out-Null }
 
+# ⚠️ **真的寫一個檔案試試看。** 只檢查目錄存不存在是不夠的——交付包自己
+#    帶了一個空的 logs\，所以解壓在 C:\Program Files\ 或磁碟根目錄這種
+#    不可寫的位置時，目錄檢查會過、排程會建立、畫面會說「完成」，
+#    然後每天靜默空轉——run_stage.cmd 的重導向失敗，一個字都不留。
+$probe = Join-Path $LogDir '.write-test'
+try {
+    [System.IO.File]::WriteAllText($probe, 'x')
+    Remove-Item $probe -Force
+} catch {
+    throw (
+        "$LogDir 寫不進去（$($_.Exception.Message)）。" +
+        "請把整個資料夾移到寫得進去的位置再重試，例如 C:\Users\<你>\invest-os。" +
+        "留在這裡的話排程會建立成功，但每天什麼都不會發生、也不會留下紀錄。"
+    )
+}
+
 $Runner = Join-Path $PSScriptRoot 'run_stage.cmd'
 if (-not (Test-Path $Runner)) { throw "找不到 $Runner" }
 

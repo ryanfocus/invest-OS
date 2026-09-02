@@ -61,6 +61,7 @@ class FakeBroker:
         contracts_error: Exception | None = None,
         order_error: Exception | None = None,
         position_type: str = "",
+        accounts: list | None = None,
         fills: list | None = None,
         query_result: object = _UNSET,
     ):
@@ -72,6 +73,7 @@ class FakeBroker:
         # 券商回報的倉別。預設空字串＝「不知道」，與真實的『看不懂』一致——
         # 想測倉別檢查的測試必須自己寫明，那件事因此在測試碼裡看得見。
         self._position_type = position_type
+        self._accounts = accounts or []
         self._contracts = contracts if contracts is not None else {
             code: ContractInfo(code=code, last_trading_day=20260819) for code in PRODUCT_CODES
         }
@@ -125,6 +127,10 @@ class FakeBroker:
         if not isinstance(self._order_error, list):
             return self._order_error
         return self._order_error.pop(0) if self._order_error else None
+
+    def list_accounts(self) -> list:
+        """假的帳號清單。預設空的——想測「查得到」的測試要自己給。"""
+        return list(self._accounts)
 
     def place_order(self, request) -> OrderResult:
         """記下委託並回報成交。

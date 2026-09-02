@@ -156,6 +156,48 @@ _QUERY_NO_DATA = "M003"
 _QUERY_ERROR = "M999"
 
 
+# ── 期貨帳號（OnAccount 的 bstrAccountData）────────────────────────────
+#
+# 逗號分隔，欄位依序是「市場, 分公司代碼, 分公司, 帳號, 身分證字號, 姓名」。
+# ⚠️ **完整帳號 = 分公司代碼 ＋ 帳號**，是兩段接起來的。
+_ACCT_MARKET, _ACCT_BRANCH_CODE, _ACCT_NUMBER, _ACCT_NAME = 0, 1, 3, 5
+_ACCT_FIELDS = 6
+
+
+@dataclass(frozen=True)
+class FuturesAccount:
+    """一個可以下單的帳號。
+
+    ⚠️ **刻意不帶身分證字號**，雖然原始列的第 5 欄就是它。這個物件會被印在
+    畫面上、可能被截圖貼給別人求助；帳號本身已經夠敏感了，沒有理由讓
+    身分證字號跟著旅行——而它在這裡沒有任何用途。
+    """
+
+    market: str          # TF=台灣期貨、TS=台灣證券、OF=海外期貨、OS=複委託
+    account: str         # 分公司代碼 ＋ 帳號，就是要填進 .env 的那一串
+    name: str
+
+
+def parse_account_row(raw: str) -> FuturesAccount | None:
+    """解析一列 `OnAccount`。看不懂就回 `None`。
+
+    看不懂時**不猜**：這條線上有多種市場，而回傳格式我們只實機驗證過期貨那一種。
+    拼出一個看起來像帳號的字串會被人填進 `.env`，然後在下單那一刻才發現不對。
+    """
+    fields = raw.split(",")
+    if len(fields) < _ACCT_FIELDS:
+        return None
+    branch = fields[_ACCT_BRANCH_CODE].strip()
+    number = fields[_ACCT_NUMBER].strip()
+    if not branch or not number:
+        return None
+    return FuturesAccount(
+        market=fields[_ACCT_MARKET].strip(),
+        account=branch + number,
+        name=fields[_ACCT_NAME].strip(),
+    )
+
+
 def parse_product_list(raw: str) -> dict:
     """解析群益商品清單，取出我們交易的三個商品。
 

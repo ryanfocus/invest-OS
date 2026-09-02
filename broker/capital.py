@@ -45,6 +45,7 @@ from broker import (
 # 線路格式的解析住在隔壁——這個檔案只管 COM 生命週期。
 # 分家的理由見 `capital_wire` 的模組說明（2026-08-23 架構檢視）。
 from broker.capital_wire import (
+    parse_account_row,
     FillSummary,
     build_future_order_fields,
     parse_filled_lots,
@@ -441,6 +442,49 @@ class CapitalBroker:
         except Exception as exc:  # noqa: BLE001
             logger.error("成交查詢失敗（%s）：%s", type(exc).__name__, exc)
             return None
+
+    def list_accounts(self) -> list:
+        """查出這個登入帳號底下有哪些可下單的帳戶。
+
+        給**還沒填 `CAPITAL_FUTURES_ACCOUNT`** 的人用。在 2026-09-02 之前，
+        取得那個值的唯一指引是 `tools/verify_login.py --show-account`——
+        而那支程式不在交付包裡，等於把收到程式的人導進死路。
+
+        ⚠️ **不讀憑證。** 查帳號不需要它（`verify_login` 一直都是這樣做的），
+        而那正好符合新使用者的處境：憑證是後面才辦的步驟，總不能要求他
+        先有憑證才查得到要填進設定裡的帳號。
+
+        ⚠️ **事件接收端用完就放掉。** 它只在這條路上存在，不會留在每天下單的
+        那條路徑上——那條路是唯一會動到錢的地方，不該為了一個查詢功能多掛東西。
+        """
+        if self._center is None:
+            raise LoginFailed("尚未登入")
+
+        import comtypes.client
+
+        class _AccountSink:
+            def __init__(self):
+                self.rows: list[str] = []
+
+            def OnAccount(self, bstrLogInID, bstrAccountData):
+                self.rows.append(bstrAccountData)
+
+        sink = _AccountSink()
+        handler = comtypes.client.GetEvents(self._order, sink)
+        try:
+            code = self._order.SKOrderLib_Initialize()
+            if code != 0:
+                raise LoginFailed(f"下單元件初始化失敗，{self._message(code)}")
+            code = self._order.GetUserAccount()
+            if code != 0:
+                raise LoginFailed(f"查詢帳號失敗，{self._message(code)}")
+            self._pump_until(lambda: bool(sink.rows), 5.0)
+        finally:
+            del handler
+
+        accounts = [a for a in (parse_account_row(r) for r in sink.rows) if a]
+        logger.info("查到 %d 個帳號（原始 %d 列）", len(accounts), len(sink.rows))
+        return accounts
 
     def _ensure_order_ready(self) -> None:
         """初始化下單元件、連上回報、取得期貨帳號。

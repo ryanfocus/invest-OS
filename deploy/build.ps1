@@ -94,6 +94,26 @@ Copy-Item (Join-Path $Frozen '*') $Bundle -Recurse
 Copy-Item (Join-Path $Root 'tools\setup_schedule.ps1') $Bundle
 Copy-Item (Join-Path $Deploy 'templates\run_stage.cmd') $Bundle
 
+# 雙擊就能跑的包裝。原廠 Windows 不讓 .ps1 直接執行（預設 Restricted），
+# 而從網路傳來的 zip 解開後還帶封鎖標記——兩者 -ExecutionPolicy Bypass 都能解
+# （2026-09-02 實測驗證）。
+foreach ($c in 'show-account.cmd', 'setup-schedule.cmd',
+               'show-schedule.cmd', 'remove-schedule.cmd') {
+    Copy-Item (Join-Path $Deploy "templates\$c") $Bundle
+}
+
+# 版本識別。凍結後的 traceback 沒有原始碼行只有行號——沒有這個檔案，
+# 使用者回報的錯誤對不回任何一次打包。main() 每次執行的第一行會印出它。
+Push-Location $Root
+try {
+    $commit = (& git rev-parse --short HEAD).Trim()
+    $pending = & git status --porcelain -- . ':(exclude)config/settings.yaml'
+    $dirty = if ($pending) { '+dirty' } else { '' }
+} finally { Pop-Location }
+[System.IO.File]::WriteAllLines((Join-Path $Bundle 'BUILD.txt'),
+    @("$commit$dirty  $(Get-Date -Format 'yyyy-MM-dd HH:mm')"),
+    (New-Object System.Text.UTF8Encoding $false))
+
 # ⚠️ 設定檔取自版控，不是工作區。理由見檔頭。
 New-Item -ItemType Directory -Path (Join-Path $Bundle 'config') -Force | Out-Null
 #
@@ -118,9 +138,11 @@ try {
 Copy-Item (Join-Path $Root '.env.example') $Bundle
 Copy-Item (Join-Path $Deploy 'templates\README.md') $Bundle
 New-Item -ItemType Directory -Path (Join-Path $Bundle 'docs') -Force | Out-Null
-foreach ($d in 'MESSAGES.md', 'LOGIN_SETUP.md') {
-    Copy-Item (Join-Path $Root "docs\$d") (Join-Path $Bundle 'docs')
-}
+# MESSAGES.md 兩種形狀共用（它講的是訊息，與檔案位置無關）。
+# LOGIN_SETUP.md **不共用**：repo 那份是寫給開發者的，會叫人 pip install、
+# 跑 tools/verify_login.py——而對方沒有 Python，包裡也沒有 tools\。
+Copy-Item (Join-Path $Root 'docs\MESSAGES.md') (Join-Path $Bundle 'docs')
+Copy-Item (Join-Path $Deploy 'templates\LOGIN_SETUP.md') (Join-Path $Bundle 'docs')
 
 # 空的資料夾，讓對方一眼看得出東西會長在哪
 foreach ($d in 'logs', 'state') {
@@ -160,7 +182,8 @@ if (-not (Select-String -Path $settings -Pattern '自動下單總開關' -Quiet)
 # 該在的東西在不在。run_stage.cmd 特別重要——**每日日誌完全來自它的 >> 重導向**，
 # 程式裡沒有任何 FileHandler。少了它，排程照樣跑、照樣下單，但一個字都不會留下，
 # 而唯一的故障偵測是「早上沒收到 Discord」，那不會為「有跑但跑歪」觸發。
-foreach ($f in 'osmain.exe', 'run_stage.cmd', 'setup_schedule.ps1', 'README.md', '.env.example', 'config\settings.yaml') {
+foreach ($f in 'osmain.exe', 'run_stage.cmd', 'setup_schedule.ps1', 'README.md', '.env.example', 'config\settings.yaml', 'BUILD.txt',
+               'show-account.cmd', 'setup-schedule.cmd') {
     if (-not (Test-Path (Join-Path $Bundle $f))) { $problems += "交付包裡少了 $f" }
 }
 

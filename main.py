@@ -15,12 +15,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass, replace
 # `time` 這個名字已經被標準函式庫的 time 模組佔走（給 time.sleep 用），
 # 所以 datetime.time 改叫 clock——它代表的是牆上時鐘的時刻。
 from datetime import date, datetime, time as clock
 
+import paths
 import strategy
 from broker import (
     BUY,
@@ -970,7 +972,48 @@ def run_exit(
     return _finish(remaining=0, exited=True)
 
 
-def _build_runtime():
+def run_account(broker, out=print) -> int:
+    """查出可下單的帳號並印出來，讓使用者抄進 `.env`。
+
+    ⚠️ **印完整帳號，不遮罩。** 這與 `tools/verify_login.py` 的取捨相反——
+    那支工具預設遮罩，因為它的用途是「貼給別人求助」；這一支的唯一用途
+    就是「抄進設定檔」，遮了就沒用。所以輸出本身要帶警告。
+
+    ⚠️ **不需要憑證。** 那正好符合新使用者的處境：憑證是後面才辦的步驟，
+    總不能要求他先有憑證才查得到要填進設定裡的帳號。
+
+    回傳結束碼——這支是給人手動跑的，錯誤要用看得懂的話印出來，
+    不可以用 traceback 收場（第一次跑它的人多半帳密還沒填對）。
+    """
+    try:
+        broker.login()
+        accounts = broker.list_accounts()
+    except LoginFailed as exc:
+        out(f"登入失敗：{exc}")
+        out("請檢查 .env 裡的 CAPITAL_USER_ID 與 CAPITAL_PASSWORD。")
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        out(f"查詢帳號時發生非預期錯誤（{type(exc).__name__}）：{exc}")
+        return 1
+
+    if not accounts:
+        out("查不到任何帳號。")
+        out("")
+        out("最可能的原因是**期貨 API 下單聲明書還沒簽**——沒簽的話群益不會")
+        out("回傳期貨帳號。請登入群益的網站或洽營業員確認，簽完隔一個工作天再試。")
+        return 1
+
+    out("")
+    out(f"  {'市場':<6}{'完整帳號':<16}姓名")
+    for a in accounts:
+        out(f"  {a.market:<6}{a.account:<16}{a.name}")
+    out("")
+    out("把【市場為 TF】那一筆的完整帳號，填進 .env 的 CAPITAL_FUTURES_ACCOUNT。")
+    out("⚠️ 上面是完整帳號，**不要把這個畫面貼給任何人**。")
+    return 0
+
+
+def _build_runtime(require_account: bool = True):
     """組裝真實相依。**這裡是唯一建立真實 broker 與 Discord 連線的地方**——
 
     `run_entry` / `run_exit` 都不知道自己拿到的是真的還是假的，
@@ -990,7 +1033,10 @@ def _build_runtime():
         return None
 
     account = settings.read_env("CAPITAL_FUTURES_ACCOUNT")
-    if config.auto_order_enabled and not account:
+    # ⚠️ 查帳號那條路**不能**要求帳號——那正是它要查的東西。
+    #    少了這個條件，還沒填帳號的人會被擋在「請先填帳號」，
+    #    而唯一告訴他怎麼查的工具就是這一支。
+    if require_account and config.auto_order_enabled and not account:
         # 開著開關卻沒帳號，等於每天跑到最後一步才失敗。早點講。
         logger.error(
             "自動下單已開啟但找不到 CAPITAL_FUTURES_ACCOUNT，"
@@ -1018,6 +1064,7 @@ def main(argv=None) -> int:
 
         python main.py entry    08:50 進場
         python main.py exit     13:40 出場（結算日 13:30）
+        python main.py account  查出可下單的帳號（第一次設定時用）
 
     ⚠️ **刻意做成兩個獨立的執行**（ADR-0001）。早上那班異常結束時，
     下午那班仍然會被排程觸發——部位不會因為早上出事就沒人管。
@@ -1025,8 +1072,9 @@ def main(argv=None) -> int:
     import argparse
 
     parser = argparse.ArgumentParser(description="OS 策略")
-    parser.add_argument("stage", choices=("entry", "exit"),
-                        help="entry=08:50 進場，exit=13:40 出場")
+    parser.add_argument("stage", choices=("entry", "exit", "account"),
+                        help="entry=08:50 進場，exit=13:40 出場，"
+                             "account=查出可下單的帳號（給第一次設定的人用）")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -1034,10 +1082,27 @@ def main(argv=None) -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    runtime = _build_runtime()
+    # ⚠️ **每次執行的第一行印出這是哪一個 build。**
+    #    凍結後的 traceback 沒有原始碼行，只有行號——而 main.py 最近幾週在
+    #    1005–1062 行之間跳動，同一個行號在不同版本是完全不同的東西。
+    #    沒有這一行，使用者回報的錯誤對不回任何一次打包。
+    #    開發時沒有這個檔案，跳過即可。
+    build_file = os.path.join(paths.app_root(), "BUILD.txt")
+    if os.path.exists(build_file):
+        try:
+            with open(build_file, encoding="utf-8") as fh:
+                logger.info("版本 %s", fh.readline().strip())
+        except OSError:
+            pass          # 讀不到版本不該擋住交易
+
+    runtime = _build_runtime(require_account=args.stage != "account")
     if runtime is None:
         return 1
     config, broker, notify = runtime
+
+    if args.stage == "account":
+        # 手動執行的查詢，不碰狀態檔、不發 Discord、不下單。
+        return run_account(broker)
 
     # 日期與時刻**一起取**，而且只取這一次。分兩次呼叫的話，跨午夜那一瞬間
     # 會拿到互相矛盾的兩個值。時間在這個系統裡不做接縫（見 SPEC），
