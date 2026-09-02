@@ -552,7 +552,8 @@ def test_the_unknown_exit_message_never_prints_a_placeholder_for_missing_lots():
 #
 # 券商每一筆回報都會說它對淨部位做了什麼：開倉（N）或平倉（O）。
 # 早上開了就下午平，早上平掉別人的（跨越零）下午就開一口還回去——
-# **必然相反**。三天的實機資料都是這樣（8/21、8/24、8/25）。
+# **必然相反**。三天的實機資料都是這樣（8/21、8/24、8/25）——
+# ⚠️ 但那三天都是 1 口。2026-09-02 的 2 口混合單推翻了「必然」，見下方那條測試。
 #
 # 兩邊一樣代表下午那筆**沒有平到任何東西**。最常見的成因是早上那口在盤中
 # 被手動平掉了，於是下午的反向委託開出一個沒人管的新部位——而程式會以為
@@ -563,9 +564,37 @@ def test_the_unknown_exit_message_never_prints_a_placeholder_for_missing_lots():
 
 def test_matching_position_types_raise_the_alarm():
     """早上開倉、下午也開倉 → 什麼都沒平掉，發告警。"""
-    _, notifier, _ = _run(_record(entry_position_type="N"),
+    _, notifier, _ = _run(_record(lots=1, requested_lots=1, entry_position_type="N"),
                           broker=FakeBroker(position_type="N"))
     assert "沒有平到" in notifier.text, f"沒有發告警：{notifier.text}"
+
+
+def test_more_than_one_lot_makes_the_flags_uninterpretable():
+    """**2 口以上的單不做這個檢查。**
+
+    🔴 2026-09-02 實機誤報。使用者持有 1 口多單、程式賣 2 口：
+
+        08:50  SELL 2 @46650   券商記 N（新倉）
+        13:40  BUY  2 @46142   券商記 N（新倉）
+
+    兩筆都是 N，檢查開火——但單有成交、部位有平掉、帳戶也回到 1 口多單。
+    **是檢查錯了，不是交易錯了。**
+
+    成因：券商必須把「賣 2 口」拆成「平掉使用者那 1 口 ＋ 開 1 口空單」，
+    而回報只給**一個**旗標。這條規則的前提是「一筆單要嘛純開、要嘛純平」，
+    在混合單下不成立。
+
+    ⚠️ **為什麼用口數當條件**：整數口數下，1 口的單不可能混合——反向部位
+       ≥1 就是純平、=0 就是純開。要混合必須 `0 < 反向部位 < 委託口數`，
+       那需要委託 ≥ 2 口。程式看不到帳戶部位（SPEC 的決定），
+       但它知道自己送了幾口。
+
+    代價要講明：**口數 ≥ 2 時就沒有這道保護了。** 那比誤報好——
+    習慣忽略某類訊息的人，真的出事那次也不會看。
+    """
+    _, notifier, _ = _run(_record(lots=2, requested_lots=2, entry_position_type="N"),
+                          broker=FakeBroker(position_type="N"))
+    assert notifier.sent == [], f"2 口的混合單不該發告警：{notifier.text}"
 
 
 def test_opposite_position_types_say_nothing():

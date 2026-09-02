@@ -622,6 +622,10 @@ def test_the_two_reports_agree_on_the_position_type():
 def test_entry_and_exit_position_types_are_always_opposite():
     """**進場與出場的倉別必然相反**——兩天四筆都符合。
 
+    ⚠️ **2026-09-02 更正：那四筆都是 1 口。** 委託口數大於帳上反向部位時，
+    券商會把單拆成平倉＋新倉而只回一個旗標，「相反」就不成立了
+    （那天持有 1 口多單、賣 2 口，進出場兩筆都回 N）。
+
         進場 N（開了倉）      → 出場必然 O（平掉它）
         進場 O（平掉別人的）  → 出場必然 N（開一口還回去）
 

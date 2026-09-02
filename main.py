@@ -931,7 +931,7 @@ def run_exit(
     logger.info("出場完成，平掉 %d 口", result.filled_lots)
     write_position(replace(record, exited=True, close_reason=BY_EXIT), path=state_path)
 
-    # **進場與出場的倉別必然相反。** 早上開了就下午平；早上平掉使用者的部位
+    # **進場與出場的倉別必然相反——但只在一筆單純開或純平時。** 早上開了就下午平；早上平掉使用者的部位
     # （跨越零）就下午開一口還回去。一樣代表下午那筆**碰不到早上那口**——
     # 最常見的成因是它在盤中被手動平掉了，於是這筆反向委託開出一個新部位。
     #
@@ -943,7 +943,21 @@ def run_exit(
     #
     # 狀態檔照實記成已出場：那筆單**確實成交了**。寫成失敗的話，隔天早上
     # 那則「前一日部位沒收掉」的提醒會指著方向相反的東西叫人去平。
-    if (record.entry_position_type and result.position_type
+    # ⚠️ **只有 1 口的單能這樣判斷。** 2026-09-02 實機誤報：使用者持有 1 口多單、
+    #    程式賣 2 口，券商把它拆成「平掉那 1 口 ＋ 開 1 口空單」，而回報只給
+    #    **一個**旗標（兩班都是 N）。這條規則的前提是「一筆單要嘛純開、要嘛純平」，
+    #    在混合單下不成立——那天單有成交、部位也平掉了，是檢查錯了。
+    #
+    #    整數口數下，1 口的單不可能混合：反向部位 ≥1 就是純平、=0 就是純開。
+    #    要混合必須 `0 < 反向部位 < 委託口數`，那需要委託 ≥ 2 口。
+    #    程式看不到帳戶部位（SPEC 的決定），但它知道自己送了幾口。
+    #
+    #    代價：**口數 ≥ 2 時沒有這道保護。** 那比誤報好——習慣忽略某類訊息的人，
+    #    真的出事那次也不會看。這一則正是叫人去看帳戶的訊息。
+    if record.lots is not None and record.lots > 1:
+        logger.info("委託是 %d 口，可能被券商拆成平倉＋新倉，倉別無法判讀，跳過對照",
+                    record.lots)
+    elif (record.entry_position_type and result.position_type
             and record.entry_position_type == result.position_type):
         reason = (f"出場沒有平到倉：早上與下午的倉別都是 "
                   f"{result.position_type}，帳上可能多一口沒人管的部位")
