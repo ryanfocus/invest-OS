@@ -428,6 +428,38 @@ def build_exit_state_broken_payload(reason: str, trading_date: date) -> dict:
     return {"content": "\n".join(lines)}
 
 
+_REDACTED = "<webhook 已遮蔽>"
+
+
+def redact_webhook(text: str, webhook_url: str) -> str:
+    """把 webhook 從訊息裡拿掉，但**留下主機名稱與失敗原因**。
+
+    `requests` 的例外字串含完整的請求 URL，而 Discord 的 webhook 最後一段
+    就是 token：
+
+        HTTPSConnectionPool(host='discord.com', port=443):
+        Max retries exceeded with url: /api/webhooks/<id>/<token> (Caused by ...)
+
+    任何 DNS 失敗、逾時、斷線都會走到那裡，而那行文字會被寫進當日的日誌——
+    正是出事時使用者會傳出來的檔案。`deploy/build.ps1` 把
+    `DISCORD_WEBHOOK_URL` 列為四大機密之一、掃遍整個交付包確保它不外流，
+    程式自己卻會把它寫進日誌（2026-09-02 查驗發現）。
+
+    ⚠️ **只遮網址，不遮原因。** 「為什麼發不出去」是排查唯一的線索，
+       整段吃掉的話這則日誌就沒有價值了。
+    """
+    if not webhook_url:
+        return text
+    out = text.replace(webhook_url, _REDACTED)
+    # 例外訊息裡通常只有路徑那一段（不含 scheme 與主機），所以也要換掉它
+    path = webhook_url.split("://", 1)[-1]
+    if "/" in path:
+        path = path[path.index("/"):]
+        if len(path) > 1:
+            out = out.replace(path, _REDACTED)
+    return out
+
+
 def send(payload: dict, webhook_url: str, timeout=(5, 10)) -> bool:
     """送出 payload。回傳是否成功。
 
@@ -440,7 +472,9 @@ def send(payload: dict, webhook_url: str, timeout=(5, 10)) -> bool:
     try:
         resp = requests.post(webhook_url, json=payload, timeout=timeout)
     except requests.RequestException as exc:
-        logger.error("Discord 發送例外：%s", exc)
+        # ⚠️ 一定要遮。例外字串含完整的請求 URL，而 webhook 的最後一段是 token——
+        #    見 `redact_webhook`。
+        logger.error("Discord 發送例外：%s", redact_webhook(str(exc), webhook_url))
         return False
 
     if resp.ok:

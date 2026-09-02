@@ -100,7 +100,13 @@ foreach ($job in $Jobs) {
     #      但程式自己會擋：開盤價的新鮮度檢查會發現那不是當日報價。
     # ExecutionTimeLimit：20 分鐘。取開盤價最多重試三次、每次隔一分鐘，
     #   加上對帳打三次期交所，正常不會超過五分鐘。
+    # AllowStartIfOnBatteries / DontStopIfGoingOnBatteries：
+    #   工作排程器的**預設是不跑**（DisallowStartIfOnBatteries=True）。
+    #   筆電沒插電的話兩班都不會啟動——而 13:40 那班是刻意靜默的
+    #   （「沒消息就是好消息」），所以部位會過夜而且**零通知**。
+    #   那正是這套系統開宗明義要避免的事。跑到一半被拔電也一樣會被砍掉。
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit (New-TimeSpan -Minutes 20)
 
     Register-ScheduledTask -TaskName $job.Name -Action $action -Trigger $trigger `

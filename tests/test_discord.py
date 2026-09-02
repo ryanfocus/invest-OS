@@ -59,6 +59,49 @@ def test_open_prices_are_rendered_without_decimals():
     assert "42331.0" not in text
 
 
+# --- webhook 的 token 不可以進日誌 ---
+
+
+def test_a_network_failure_does_not_write_the_webhook_into_the_log():
+    """**發送失敗時記下的訊息裡不可以有 webhook。**
+
+    🔴 2026-09-02 查驗發現。`requests` 的例外字串含**完整的請求 URL**，
+    而 Discord 的 webhook 網址最後一段就是 token：
+
+        HTTPSConnectionPool(host=...): Max retries exceeded with
+        url: /api/webhooks/1234567890/<這裡是 token>
+
+    任何 DNS 失敗、逾時、斷線都會走到那一行，然後那段文字被寫進
+    `logs/entry-YYYYMMDD.log`——而那正是出事時使用者會傳出來的檔案。
+    `deploy/build.ps1` 把 DISCORD_WEBHOOK_URL 列為四大機密之一、掃遍整個
+    交付包確保它不外流，程式自己卻會把它寫進日誌。
+
+    ⚠️ 主機名稱與失敗原因**要留著**——那是排查「為什麼發不出去」唯一的線索。
+       遮掉的只有網址本身。
+    """
+    from notifiers.discord import redact_webhook
+    url = "https://discord.com/api/webhooks/1234567890/TOKEN-abcdef"
+    raw = (f"HTTPSConnectionPool(host='discord.com', port=443): "
+           f"Max retries exceeded with url: /api/webhooks/1234567890/TOKEN-abcdef "
+           f"(Caused by NameResolutionError)")
+    safe = redact_webhook(raw, url)
+    assert "TOKEN-abcdef" not in safe, f"token 還在：{safe}"
+    assert "1234567890" not in safe, f"webhook id 還在：{safe}"
+    assert "NameResolutionError" in safe, "失敗原因被一起遮掉了，那樣就查不出問題"
+    assert "discord.com" in safe, "主機名稱被遮掉了"
+
+
+def test_redaction_survives_an_empty_or_odd_webhook():
+    """webhook 沒設定或格式怪異時，遮罩不可以自己爆掉。
+
+    這條路本來就是失敗路徑，在上面再炸一次的話，原本只是「發不出訊息」
+    會變成整班以 traceback 結束。
+    """
+    from notifiers.discord import redact_webhook
+    for url in ("", "not-a-url", "https://x/"):
+        assert redact_webhook("something went wrong", url) == "something went wrong"
+
+
 def test_the_exit_unknown_message_says_what_was_actually_sent():
     """**這則訊息的口數必須等於出場單真的送出去的口數。**
 
