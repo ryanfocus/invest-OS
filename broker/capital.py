@@ -68,18 +68,6 @@ _MARKET_FUTURES = 2
 # 群益的價格是整數且放大 100 倍
 _PRICE_SCALE = 100.0
 
-# 連線環境（SKCenterLib_SetAuthority）。範例程式把 flag 標成
-# 0 正式／1 正式SGX／2 測試／3 測試SGX，但**官方文件的說明是**：
-#
-#   「(SGX 專線only)手動設定特殊功能屬性開啟或關閉。
-#     SGX 專線屬性：關閉／開啟：0／1
-#     Bit 1為環境設定：預設0，代表正式環境
-#     一般客戶可忽略此部分」
-#
-# ⚠️ **所以這不是一般台指期帳戶的模擬環境。** 它屬於 SGX 專線（需另向營業員申請）。
-#    設成 test 很可能只是無效，而「以為切到測試環境所以很安全」比不切更危險。
-#    在向營業員確認之前，不可以把它當成防護。
-_AUTHORITY_FLAGS = {"production": 0, "test": 2}
 
 # 官方文件：「限制每次查詢間需間隔五秒」。多留 0.5 秒緩衝。
 _QUERY_INTERVAL_SECONDS = 5.5
@@ -224,18 +212,14 @@ class CapitalBroker:
         self,
         user_id: str,
         password: str,
-        environment: str = "production",
         account: str = "",
         connect_timeout: float = 30.0,
-        fill_timeout: float = 10.0,
+        # 30 秒：等推播的時間。逾時**不是放棄**——會改用查詢管道補問，
+        # 而且下午出場前還會再問一次（見 main._resolve_uncertain）。
+        fill_timeout: float = 30.0,
     ):
-        if environment not in _AUTHORITY_FLAGS:
-            raise ValueError(
-                f"environment 必須是 {list(_AUTHORITY_FLAGS)} 之一，目前是 {environment!r}"
-            )
         self._user_id = user_id
         self._password = password
-        self._environment = environment
         self._connect_timeout = connect_timeout
         self._fill_timeout = fill_timeout
         self._sk = None
@@ -284,24 +268,14 @@ class CapitalBroker:
         self._quote_events = _QuoteEvents()
         self._reply_events = _ReplyEvents()
 
-        # 正式環境是不呼叫時的預設值，所以**刻意不呼叫**。
+        # 📌 **刻意不呼叫 SKCenterLib_SetAuthority。** 不呼叫就是正式環境，
+        #    那是它的預設值。
         #
-        # ⚠️ 這裡曾經無條件呼叫 `SetAuthority(0)` 並在非 0 回傳時拋 LoginFailed。
-        #    但文件說這個函式是「(SGX 專線only)…一般客戶可忽略此部分」——
-        #    一般帳戶若回非 0，整個 08:50 的班就會死在一個它本來不需要的呼叫上。
-        #    要正式環境就什麼都不做，這是最安全也最誠實的寫法。
-        if self._environment != "production":
-            flag = _AUTHORITY_FLAGS[self._environment]
-            code = self._center.SKCenterLib_SetAuthority(flag)
-            if code != 0:
-                # 要了測試環境卻沒切成功 → 後續的單會進正式環境。必須擋下。
-                raise LoginFailed(
-                    f"要求連線環境 {self._environment} 但設定失敗，{self._message(code)}。"
-                    "**不可繼續**——委託會送到正式環境。"
-                    "此功能依官方文件屬於 SGX 專線，一般帳戶可能不支援，請洽營業員。"
-                )
-            logger.warning("已切換至非正式環境：%s（尚未經實機確認是否真的生效）",
-                           self._environment)
+        #    這裡曾經有一個 `environment` 參數可以切到「測試環境」，2026-09-03
+        #    拿掉。官方文件對 SetAuthority 的說明是「(SGX 專線only)…一般客戶
+        #    可忽略此部分」，而 SGX 專線要另向營業員申請——**那不是一般帳戶的
+        #    模擬環境**。留著它的真正危險是「以為切到測試環境所以很安全」，
+        #    而那比根本不切更糟。要驗下單就用 1 口微台在正式環境打。
 
         # 順序有意義：公告與聲明書都必須在登入前就有接收端
         self._handlers = [

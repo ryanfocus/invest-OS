@@ -68,30 +68,3 @@ def test_first_weekday_after_new_year_is_a_trading_day():
 
 
 # --- 臨時開市（補班日）與臨時休市（颱風假）---
-
-
-def test_makeup_workday_saturday_can_be_marked_as_trading():
-    """補班日是週六卻要開市。`holidays` 套件不會告訴我們，只能人工指定。"""
-    saturday = date(2026, 8, 8)
-    assert is_trading_day(saturday) is False
-    assert is_trading_day(saturday, extra_openings={saturday}) is True
-
-
-def test_typhoon_closure_overrides_an_ordinary_weekday():
-    """颱風假是平日卻休市。invest-hm 踩過這個坑。"""
-    weekday = date(2026, 8, 10)
-    assert is_trading_day(weekday) is True
-    assert is_trading_day(weekday, extra_closures={weekday}) is False
-
-
-def test_closure_wins_over_opening_when_both_are_listed():
-    """補班日又遇到颱風 → 休市。安全的方向優先。"""
-    day = date(2026, 8, 8)
-    assert is_trading_day(day, extra_openings={day}, extra_closures={day}) is False
-
-
-def test_overrides_do_not_leak_between_calls():
-    """一次呼叫的覆寫不可影響下一次——共用可變狀態是這類 bug 的溫床。"""
-    day = date(2026, 8, 10)
-    is_trading_day(day, extra_closures={day})
-    assert is_trading_day(day) is True

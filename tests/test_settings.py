@@ -97,39 +97,6 @@ def test_retry_attempts_is_at_least_two():
 # --- 日期解析（code-review 2026-08-10：加引號會靜默失效）---
 
 
-def test_unquoted_yaml_date_becomes_a_real_date():
-    import datetime
-    parsed = settings_module._parse_dates([datetime.date(2026, 8, 10)])
-    assert parsed == frozenset({datetime.date(2026, 8, 10)})
-
-
-def test_quoted_yaml_date_is_also_accepted():
-    """yaml 的 `- "2026-08-10"` 會是字串。實測過：不處理的話颱風假被靜默無視。"""
-    import datetime
-    parsed = settings_module._parse_dates(["2026-08-10"])
-    assert parsed == frozenset({datetime.date(2026, 8, 10)})
-
-
-def test_datetime_is_narrowed_to_date():
-    import datetime
-    parsed = settings_module._parse_dates([datetime.datetime(2026, 8, 10, 9, 0)])
-    assert parsed == frozenset({datetime.date(2026, 8, 10)})
-
-
-def test_unparseable_date_raises_at_load_time_not_silently():
-    with pytest.raises(ValueError, match="2026/08/10"):
-        settings_module._parse_dates(["2026/08/10"], "calendar.extra_closures")
-
-
-def test_non_date_value_raises():
-    with pytest.raises(ValueError):
-        settings_module._parse_dates([12345], "calendar.extra_closures")
-
-
-def test_empty_list_is_an_empty_set():
-    assert settings_module._parse_dates([]) == frozenset()
-
-
 # --- 下單設定（ticket 04）---
 #
 # 這一組的期望值來自 SPEC 與 ticket 04 的驗收條件，不是從程式反推的。
@@ -143,15 +110,6 @@ def test_shipped_config_has_auto_ordering_switched_off():
     程式碼裡的 fallback 值保護不了任何人，設定檔的實際內容才會。
     """
     assert settings_module.load().auto_order_enabled is False
-
-
-def test_shipped_config_points_at_the_production_environment():
-    """報價必須是真的，所以連線環境是正式環境。
-
-    這與上一條合起來才是安全的組合：正式環境 + 下單關閉 = 只發訊號不下單。
-    要驗倉別參數時改成 test，但那個狀態不該進版控。
-    """
-    assert settings_module.load().capital_environment == "production"
 
 
 def test_lot_size_below_one_is_rejected_at_load_time():
@@ -196,6 +154,30 @@ def test_the_shipped_cutoff_is_a_real_time_not_a_number():
     cutoff = settings_module.load().entry_cutoff
     assert isinstance(cutoff, datetime.time), f"讀到的是 {cutoff!r}"
     assert cutoff == datetime.time(9, 0)
+
+
+def test_the_word_none_switches_the_time_gate_off():
+    """`entry_cutoff: none` = 不設時間界線，什麼時候跑都下單。
+
+    給「排程補跑也想照樣進場」的人用。
+    """
+    assert settings_module._parse_clock("none", "order.entry_cutoff") is None
+    assert settings_module._parse_clock("NONE", "order.entry_cutoff") is None
+
+
+def test_an_empty_value_is_an_error_not_an_off_switch():
+    """**空值必須是錯誤，不可以被當成「關掉」。**
+
+    關掉一道安全關卡必須是**打得出來的字**。做成「留白＝關掉」的話，
+    任何一次手滑刪掉那個值，都會靜靜地把它關掉——而那道關卡擋的是
+    「補跑的那一班在中午開倉，然後沒有東西會去平它」。
+
+    ⚠️ 這也是為什麼不用 YAML 的 `null`／`~`：那兩個看起來就像「還沒填」。
+    """
+    import pytest as _p
+    for empty in (None, "", "   "):
+        with _p.raises(ValueError, match="entry_cutoff"):
+            settings_module._parse_clock(empty, "order.entry_cutoff")
 
 
 def test_a_cutoff_without_a_leading_zero_is_rejected_with_the_reason():
@@ -265,30 +247,3 @@ def test_discord_switch_is_type_checked_too():
 
 
 # --- 成交回報逾時（ticket 05）---
-
-
-def test_shipped_fill_timeout_is_long_enough_that_a_normal_fill_arrives_in_time():
-    """守的是**出貨設定的值**，不是程式的合法範圍——兩者是不同的事。
-
-    設太短的代價：回報其實會到，只是慢了半秒，程式卻已經記成「不確定」。
-    而「不確定」會讓下午那班拒絕自動平倉、改要求人工處理——
-    每天都要人介入的系統等於沒有自動化。5 秒是這個判斷的保守下限。
-
-    （設太長沒有對稱的風險：08:50 距離 13:40 還有好幾個小時。
-    所以程式只擋 < 1 那種「等於關掉機制」的值，不把 5 秒訂成硬性下限。）
-    """
-    assert settings_module.load().order_fill_timeout_seconds >= 5
-
-
-def test_zero_fill_timeout_is_rejected_at_load_time():
-    """0 秒等於「不等回報」，每一筆委託都會變成不確定——那是關掉機制，不是設定。"""
-    with pytest.raises(ValueError, match="fill_timeout"):
-        _config(order_fill_timeout_seconds=0)
-
-
-def test_unknown_environment_is_rejected_at_load_time():
-    """環境只有正式與測試兩種。拼錯時絕不可以「猜一個」——猜錯就是真錢。"""
-    with pytest.raises(ValueError, match="environment"):
-        _config(capital_environment="prod")
-
-

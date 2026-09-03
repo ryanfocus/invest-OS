@@ -82,20 +82,6 @@ def test_ordinary_trading_day_runs_normally():
 # --- 臨時開市／休市由設定覆寫 ---
 
 
-def test_typhoon_closure_from_config_stops_an_ordinary_weekday():
-    cfg = make_config(calendar_extra_closures={TRADING_DAY})
-    outcome, notifier, broker = _run(TRADING_DAY, cfg=cfg)
-    assert outcome.skipped is True
-    assert broker.login_calls == 0
-
-
-def test_makeup_workday_from_config_makes_a_saturday_trade():
-    cfg = make_config(calendar_extra_openings={SATURDAY})
-    outcome, _, broker = _run(SATURDAY, cfg=cfg)
-    assert outcome.skipped is False
-    assert outcome.signal is not None, "補班日照常算訊號"
-
-
 # --- 近月合約與結算日 ---
 
 

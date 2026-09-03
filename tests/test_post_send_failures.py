@@ -91,7 +91,7 @@ class _StubReplyEvents:
 
 def _broker(*, order_code=0, on_wait=None, message="SEQ0000000001"):
     """組一個內部協作物件都被換掉、不碰 COM 的 CapitalBroker。"""
-    broker = CapitalBroker("id", "pw", environment="test", account="F9990001234567")
+    broker = CapitalBroker("id", "pw", account="F9990001234567")
     broker._center = object()          # 只用來過「尚未登入」那道檢查
     broker._order_ready = True
     broker._order = _StubOrder(code=order_code, message=message)
@@ -331,7 +331,7 @@ class _StubOrderWithCert(_StubOrder):
 
 
 def _cert_broker(cert_code=0):
-    broker = CapitalBroker("U1234", "pw", environment="test", account="F9990001234567")
+    broker = CapitalBroker("U1234", "pw", account="F9990001234567")
     broker._center = object()
     broker._order = _StubOrderWithCert(cert_code)
     broker._reply = type("R", (), {"SKReplyLib_ConnectByID": lambda self, uid: 0})()

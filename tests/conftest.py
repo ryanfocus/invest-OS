@@ -120,11 +120,7 @@ def make_config(**overrides) -> settings_module.Config:
         "auto_order_enabled": False,
         "order_product": "MTX00AM",
         "order_lots": 1,
-        "order_fill_timeout_seconds": 10,
         "entry_cutoff": time(9, 0),
-        "capital_environment": "test",
-        "calendar_extra_closures": frozenset(),
-        "calendar_extra_openings": frozenset(),
     }
     base.update(overrides)
     return settings_module.Config(**base)

@@ -482,11 +482,7 @@ def _run_strategy(
     # 非交易日：什麼都不做，連登入都不做。
     # 「連登入都不做」是刻意的——登入失敗會發告警，而 Discord 的沉默
     # 只准有一種解釋：今天休市。發任何訊息都會破壞這個約定。
-    if not is_trading_day(
-        today,
-        extra_closures=config.calendar_extra_closures,
-        extra_openings=config.calendar_extra_openings,
-    ):
+    if not is_trading_day(today):
         logger.info("%s 非交易日，靜默結束", today)
         return EntryOutcome(
             signal=None, opens=None, notified=False, exit_code=0, skipped=True
@@ -639,7 +635,10 @@ def _run_strategy(
     #
     #    只在開關開著時才擋。關著的時候本來就不會送單，這時候再發一則
     #    「太晚了沒下單」只是噪音——它描述的是一件不會發生的事。
-    if config.auto_order_enabled and now > config.entry_cutoff:
+    #    `entry_cutoff is None` 代表使用者刻意關掉了這道關卡（設定裡寫 `none`）。
+    #    關掉的後果寫在設定檔裡；這裡照他的話做，不再自己加保險。
+    if (config.auto_order_enabled and config.entry_cutoff is not None
+            and now > config.entry_cutoff):
         reason = (f"這班在 {now.strftime('%H:%M')} 才跑，"
                   f"已過 {config.entry_cutoff.strftime('%H:%M')} 的界線，未下單")
         logger.error("%s", reason)
@@ -747,11 +746,7 @@ def run_exit(
         """今天沒有事情要做，也沒有事情要講。"""
         return _finish(remaining=0, skipped=True)
 
-    if not is_trading_day(
-        today,
-        extra_closures=config.calendar_extra_closures,
-        extra_openings=config.calendar_extra_openings,
-    ):
+    if not is_trading_day(today):
         logger.info("%s 非交易日，靜默結束", today)
         return _quiet()
 
@@ -1044,18 +1039,14 @@ def _build_runtime(require_account: bool = True):
         )
         return None
 
-    logger.info("連線環境=%s 自動下單=%s 標的=%s %d 口",
-                config.capital_environment,
+    logger.info("自動下單=%s 標的=%s %d 口 進場界線=%s",
                 "開啟" if config.auto_order_enabled else "關閉",
-                config.order_product, config.order_lots)
+                config.order_product, config.order_lots,
+                config.entry_cutoff.strftime("%H:%M")
+                if config.entry_cutoff else "不設限")
 
     webhook = settings.read_env("DISCORD_WEBHOOK_URL")
-    broker = CapitalBroker(
-        user_id, password,
-        environment=config.capital_environment,
-        account=account,
-        fill_timeout=config.order_fill_timeout_seconds,
-    )
+    broker = CapitalBroker(user_id, password, account=account)
     return config, broker, (lambda payload: send(payload, webhook))
 
 

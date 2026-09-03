@@ -23,7 +23,6 @@ _SETTINGS_PATH = os.path.join(_ROOT, "config", "settings.yaml")
 _ENV_PATH = os.path.join(_ROOT, ".env")
 
 
-ENVIRONMENTS = ("production", "test")
 
 # 期交所對**每筆市價委託**的口數上限：一般交易時段 10 口、盤後 5 口
 # （自 108/5/27 起）。本策略只在日盤交易，所以用 10。
@@ -48,18 +47,13 @@ class Config:
     order_product: str          # 報價代碼，必須是 broker.PRODUCT_CODES 之一
     order_lots: int
     # 送出委託後等成交回報的秒數。逾時 → 記為「不確定」並要求人工確認。
-    order_fill_timeout_seconds: int
     # 進場的時間界線。過了它就**不下單**（訊號與觀測照常）。
+    # **`None` 代表不設限**——什麼時候跑都下單。
     # 排程設了「錯過就補跑」，而程式本身沒有時鐘——停電或強制更新重開之後，
     # 進場那班會在電腦回來的那一刻觸發並用市價送單。最壞的情況是它拖到
     # 13:40 之後才跑：出場那班早就看過「沒有記錄」而靜默結束了，
     # 然後這裡開一個部位、寫下狀態檔，**再也沒有東西會去平它**。
-    entry_cutoff: datetime.time
-    # 群益連線環境。沒有預設值是刻意的——猜錯就是把測試單送到正式環境。
-    capital_environment: str
-    # 臨時休市（颱風假）與臨時開市（補班日）。holidays 套件不知道這兩種。
-    calendar_extra_closures: frozenset = frozenset()
-    calendar_extra_openings: frozenset = frozenset()
+    entry_cutoff: datetime.time | None
 
     def __post_init__(self) -> None:
         """設定錯誤要在**載入時**就炸，不可以偽裝成執行期的「今日無訊號」。
@@ -100,16 +94,9 @@ class Config:
                 "期交所限制每筆市價委託口數（一般交易時段 10 口），超過會被退單。"
                 "要下更多口需要改成分批送單或改用限價，那是另一個設計決定。"
             )
-        if self.order_fill_timeout_seconds < 1:
-            # 0 等於不等回報，每一筆委託都會變成「不確定」——那會讓下午
-            # 每天都需要人工介入，等於整個自動化失效。
+        if self.entry_cutoff is not None and not isinstance(self.entry_cutoff, datetime.time):
             raise ValueError(
-                f"order.fill_timeout_seconds 必須 ≥ 1，"
-                f"目前是 {self.order_fill_timeout_seconds}"
-            )
-        if not isinstance(self.entry_cutoff, datetime.time):
-            raise ValueError(
-                f"order.entry_cutoff 必須是 datetime.time，目前是 "
+                f"order.entry_cutoff 必須是 datetime.time 或 None，目前是 "
                 f"{self.entry_cutoff!r}（型別 {type(self.entry_cutoff).__name__}）"
             )
         if self.order_product not in PRODUCT_CODES:
@@ -117,11 +104,7 @@ class Config:
                 f"order.product 必須是 {list(PRODUCT_CODES)} 之一，"
                 f"目前是 {self.order_product!r}"
             )
-        if self.capital_environment not in ENVIRONMENTS:
-            raise ValueError(
-                f"capital.environment 必須是 {list(ENVIRONMENTS)} 之一，"
-                f"目前是 {self.capital_environment!r}"
-            )
+
 
 
 def read_raw(path: str = _SETTINGS_PATH) -> dict:
@@ -162,39 +145,11 @@ class _Tracked:
         return value
 
 
-def _parse_dates(values, where: str = "") -> frozenset:
-    """把設定的日期清單轉成 `date` 集合。
 
-    ⚠️ **不可以假設 yaml 已經幫我們轉好。** 沒加引號的 `2026-08-10` 會被解析成
-    `date`，加了引號的 `"2026-08-10"` 卻是 `str`——兩者長得一模一樣，但字串永遠
-    不會等於任何 `date`，於是颱風假被靜默無視、程式照常在休市日交易。
-    2026-08-10 實測確認過這個行為。
-
-    所以這裡兩種都收，但**認不得的一律拋錯**——設定錯誤要在載入時就炸，
-    不可以偽裝成執行期的正常行為。
-    """
-    if not values:
-        return frozenset()
-
-    parsed = set()
-    for value in values:
-        if isinstance(value, datetime.datetime):
-            parsed.add(value.date())
-        elif isinstance(value, datetime.date):
-            parsed.add(value)
-        elif isinstance(value, str):
-            try:
-                parsed.add(datetime.date.fromisoformat(value.strip()))
-            except ValueError as exc:
-                raise ValueError(
-                    f"{where} 的日期 {value!r} 格式不正確，應為 YYYY-MM-DD"
-                ) from exc
-        else:
-            raise ValueError(f"{where} 含有無法解析的日期：{value!r}（型別 {type(value).__name__}）")
-    return frozenset(parsed)
+_NO_CUTOFF = "none"
 
 
-def _parse_clock(value, where: str) -> datetime.time:
+def _parse_clock(value, where: str) -> datetime.time | None:
     """把 `"09:00"` 解析成 `datetime.time`。
 
     ⚠️ **YAML 對時間有個會咬人的陷阱：`9:00` 不是字串，是整數 540。**
@@ -216,6 +171,11 @@ def _parse_clock(value, where: str) -> datetime.time:
         )
     if isinstance(value, datetime.time):
         return value
+    if isinstance(value, str) and value.strip().lower() == _NO_CUTOFF:
+        # **關掉一道安全關卡必須是打得出來的字。** 做成「留白＝關掉」的話，
+        # 任何一次手滑刪掉值都會靜靜地把它關掉——而它擋的是
+        # 「補跑的那一班在中午開倉，然後沒有東西會去平它」。
+        return None
     if not isinstance(value, str):
         raise ValueError(
             f"{where} 必須是 HH:MM 格式的字串，目前是 {value!r}"
@@ -238,11 +198,7 @@ def build(raw) -> Config:
         auto_order_enabled=raw["order"]["auto_enabled"],
         order_product=raw["order"]["product"],
         order_lots=raw["order"]["lots"],
-        order_fill_timeout_seconds=raw["order"]["fill_timeout_seconds"],
         entry_cutoff=_parse_clock(raw["order"]["entry_cutoff"], "order.entry_cutoff"),
-        capital_environment=raw["capital"]["environment"],
-        calendar_extra_closures=_parse_dates(raw["calendar"]["extra_closures"], "calendar.extra_closures"),
-        calendar_extra_openings=_parse_dates(raw["calendar"]["extra_openings"], "calendar.extra_openings"),
     )
 
 

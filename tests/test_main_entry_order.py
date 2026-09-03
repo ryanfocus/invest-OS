@@ -200,6 +200,23 @@ def test_the_cutoff_itself_is_still_in_time():
     assert len(broker.orders) == 1
 
 
+def test_no_cutoff_means_it_orders_however_late_it_is():
+    """`entry_cutoff: none` = 使用者刻意關掉這道關卡，那就照他的話做。
+
+    這是給「排程補跑也想照樣進場」的人用的。關掉的後果寫在設定檔裡：
+    補跑那一班會在任何時刻用市價送單，而如果它落在 13:40 之後，
+    開出來的部位**沒有東西會去平它**。
+
+    ⚠️ 程式不在這裡自己加保險。使用者要打出 `none` 這個字才關得掉，
+       那已經是一個明確的選擇了——再自作主張擋一次，等於那個設定是假的。
+    """
+    _, notifier, broker = _run(LONG_OPENS, now=time(23, 59),
+                               cfg=make_config(auto_order_enabled=True,
+                                               entry_cutoff=None))
+    assert len(broker.orders) == 1, "設成不設限就該照常下單"
+    assert "太晚" not in notifier.text
+
+
 def test_a_late_run_with_ordering_switched_off_says_nothing_extra():
     """開關關著時不發「太晚了」——它描述的是一件本來就不會發生的事。
 

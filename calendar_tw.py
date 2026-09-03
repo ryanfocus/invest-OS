@@ -20,17 +20,21 @@ _TW_HOLIDAYS = holidays.country_holidays("TW")
 
 def is_trading_day(
     day: date,
-    *,
-    extra_closures: frozenset | set = frozenset(),
-    extra_openings: frozenset | set = frozenset(),
 ) -> bool:
     """`day` 是否為台灣交易日。
 
-    `extra_closures` 臨時休市（颱風假等），`extra_openings` 臨時開市（補班日等）。
-    兩者同時列出時**休市優先**——安全的方向優先，寧可少做一天也不要拿假資料下單。
+    📌 **這裡曾經有 `extra_closures` / `extra_openings` 兩個手動覆寫**
+       （颱風假、補班日），2026-09-03 拿掉。
+
+       休市那邊安全上已經不需要：颱風假沒填的話程式照樣會跑，但取到的是
+       前一交易日的報價，而 `build_open_prices` 的 L0 新鮮度檢查會擋下來
+       （實測 2026-08-09 週日取到的就是 08-07 的價格）。結果是一則
+       「今日無訊號」的噪音，不是錯誤的交易。
+
+       ⚠️ **開市那邊的代價不對稱，這是刻意接受的取捨**：真的有臨時開市而
+       `holidays` 不知道的話，那天會被**完全靜默地跳過**——沒有訊號、
+       沒有交易、沒有訊息。使用者 2026-09-03 明確選擇拿掉，理由是那兩個
+       欄位從專案開始到現在一次都沒用過，而「要記得事先填」本身就是
+       最容易漏掉的那種步驟。
     """
-    if day in extra_closures:
-        return False
-    if day in extra_openings:
-        return True
     return day.weekday() < 5 and day not in _TW_HOLIDAYS
