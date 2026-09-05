@@ -1,0 +1,15 @@
+PyYAML>=6.0
+requests>=2.31
+holidays>=0.60          # 台灣國定假日，交易日判定用
+
+# 群益 API（Windows COM）。加 platform marker 是為了讓策略邏輯能在非 Windows 上
+# 開發與測試——這兩個套件在別的平台裝不起來，而 broker 以外的程式碼都不需要它們。
+comtypes>=1.2.0; sys_platform == "win32"
+pywin32>=306; sys_platform == "win32"
+
+# 開發
+pytest>=8.0
+
+# 靜態檢查。broker/capital.py 有 400 行只在真的連上 COM 元件時才會跑，
+# 測試永遠執行不到——見 tests/test_static_checks.py。
+pyflakes>=3.0
