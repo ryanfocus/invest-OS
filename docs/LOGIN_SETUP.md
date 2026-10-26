@@ -124,7 +124,7 @@ COM 就壞了。所以要先放到一個**永遠不會動**的位置。
 官方建議 `C:\SKCOM`。把這個資料夾**整組**複製過去：
 
 ```
-D:\project\量化交易\DeplyedInvestStrategy\CapitalAPI_2.13.58_PythonExample\元件\x64\
+D:\project\量化交易\DeployedAPI\CapitalAPI_2.13.58_PythonExample\元件\x64\
 ```
 
 ⚠️ **要整組複製，不能只搬 `SKCOM.dll`。** 官方文件明講「SKCOM.dll、COM元件與憑證元件、
