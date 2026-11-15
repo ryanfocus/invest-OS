@@ -199,9 +199,12 @@ def test_a_send_without_a_sequence_number_is_fill_unknown(message):
 
 
 def test_a_send_without_a_sequence_number_says_what_to_do():
-    """訊息要講「去確認帳戶」，不是講一個看起來像市場沒成交的逾時。"""
+    """訊息要講「沒有序號」，不是講一個看起來像市場沒成交的逾時。
+
+    要人做什麼不寫在這裡：這段文字會印在告警的「原因」那一行，
+    要人做什麼由告警本身決定（2026-11-15 起是「現在不要平，等 13:40」）。"""
     broker = _broker(message="")
-    with pytest.raises(FillUnknown, match="人工確認"):
+    with pytest.raises(FillUnknown, match="未取得委託序號"):
         broker.place_order(REQUEST)
 
 

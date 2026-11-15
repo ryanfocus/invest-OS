@@ -65,6 +65,7 @@ from notifiers.discord import (
     build_exit_blocked_payload,
     build_exit_failed_payload,
     build_exit_state_broken_payload,
+    build_exit_switched_off_payload,
     build_exit_unknown_payload,
     build_entry_too_late_payload,
     build_stale_position_payload,
@@ -811,7 +812,8 @@ def run_exit(
         # 可能已經成交的單，絕不可以自動再送一次。
         reason = "出場委託的成交狀況不確定，未重複送單"
         logger.error("%s", reason)
-        return _finish(build_exit_unknown_payload(record, reason, today),
+        return _finish(build_exit_unknown_payload(record, reason, today,
+                                                  exit_seq=record.order_seq),
                        remaining=None, failure=reason)
 
     if record.is_uncertain:
@@ -852,7 +854,8 @@ def run_exit(
         # 靜默結束等於讓部位過夜而沒有人知道。
         reason = "自動下單已關閉，但帳上仍有今日部位記錄，未自動出場"
         logger.error("%s", reason)
-        return _finish(build_exit_blocked_payload(record, today),
+        # 走到這裡的記錄一定是已確認的（不確定的在上面就回去了），口數是知道的。
+        return _finish(build_exit_switched_off_payload(record, today),
                        remaining=record.lots, failure=reason)
 
     request = OrderRequest(
@@ -894,10 +897,16 @@ def run_exit(
                         # **標明不確定的是出場那一筆。** 少了它，重跑時會被當成
                         # 進場的不確定去查詢與復原，然後再送一次反向委託。
                         uncertain_stage=UNCERTAIN_EXIT,
-                        order_seq=exc.order_seq or record.order_seq),
+                        # **只記出場單自己的序號，沒有就留空。** 原本沒有時會留著
+                        # 早上進場單的序號（`or record.order_seq`）——重跑時的告警就
+                        # 叫人拿進場單去查「委託減成交」，進場單全部成交，算出 0 口要補，
+                        # 部位就這樣過夜（2026-11-15 拿掉）。
+                        order_seq=exc.order_seq),
                 path=state_path,
             )
-            return _finish(build_exit_unknown_payload(record, str(exc), today),
+            return _finish(build_exit_unknown_payload(record, str(exc), today,
+                                                      exit_seq=exc.order_seq,
+                                                      known_filled=exc.known_filled),
                            remaining=None, failure=reason)
         except OrderFailed as exc:
             # 確定沒送出去 → 重試是安全的，而且應該做。

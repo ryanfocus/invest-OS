@@ -582,11 +582,14 @@ def test_a_repeat_run_after_a_confirmed_entry_stays_silent(state_file):
     assert notifier.sent == []
 
 
-def test_an_unconfirmed_fill_asks_for_human_confirmation(state_file):
-    """Discord 訊息要能讓人直接行動，不是只說「出錯了」。"""
+def test_an_unconfirmed_fill_says_what_to_do(state_file):
+    """Discord 訊息要能讓人直接行動，不是只說「出錯了」。
+
+    要做的事是「現在不要平，等 13:40」——13:40 會先查，查到就照常平倉
+    （tests/test_manual_close_alerts.py）。"""
     _, notifier, _ = _run(LONG_OPENS, broker=_unknown_fill_broker())
     assert "MTX08" in notifier.text, "要講出是哪個商品，否則不知道去看什麼"
-    assert "人工確認帳戶實際部位" in notifier.text, "要講出該做什麼，不是只說出事了"
+    assert "不要自己平" in notifier.text, "要講出該做什麼，不是只說出事了"
 
 
 def test_a_rejected_order_does_not_ask_the_user_to_check_the_account(state_file):

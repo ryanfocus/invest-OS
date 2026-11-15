@@ -108,7 +108,7 @@ def test_the_exit_unknown_message_says_what_was_actually_sent():
     出場送的是 `record.lots`（早上**實際成交**的口數），不是 `requested_lots`
     （早上**委託**的口數）。早上委託 3 口只成交 2 口時，下午送的是 2 口。
 
-    而這則訊息的用途是叫人「先確認帳戶實際部位再決定要不要補單」——
+    而這則訊息的用途是叫人查出還沒平的口數再補單——
     數字錯在這裡，人會拿著錯的數字去對帳，然後補一筆錯的單。
 
     ⚠️ 對照 `build_exit_blocked_payload`：那一則講的是**早上那筆**委託
@@ -121,7 +121,8 @@ def test_the_exit_unknown_message_says_what_was_actually_sent():
         contract_month="202609", side=BUY, lots=2, requested_lots=3,
         last_trading_day=20260916, order_seq="SEQ1",
     )
-    text = build_exit_unknown_payload(record, "逾時", date(2026, 8, 21))["content"]
+    text = build_exit_unknown_payload(record, "逾時", date(2026, 8, 21),
+                                      exit_seq="EXIT1")["content"]
     # 斷言的是數字，不是排版——「賣出 2 口」那樣寫，改個標點就會紅。
     assert "賣出" in text and "2 口" in text, f"出場送的是 2 口（實際成交）：{text}"
     assert "3 口" not in text, f"3 口是早上的委託量，不是下午送出去的：{text}"

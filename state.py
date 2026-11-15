@@ -275,7 +275,39 @@ def clear_position(path: str = STATE_PATH) -> None:
     """
     if os.path.exists(path):
         os.remove(path)
-        logger.info("狀態檔已清除（確認今日無部位）")
+        logger.info("狀態檔已清除。%s", NO_POSITION_LINE)
+
+
+# ⚠️ **「OS 部位：」這幾個字是告警的一部分，不要改。** 狀態檔讀不懂時，
+#    出場那則告警叫人到 log 找最後一行「OS 部位：」，照那一行寫的平倉
+#    （`notifiers.discord.build_exit_state_broken_payload`）。
+NO_POSITION_LINE = "OS 部位：沒有（確認沒有成交），什麼都不用做"
+
+
+def position_line(record: PositionRecord) -> str:
+    """一句話講清楚 OS 現在持有什麼、要平的話送什麼單。每次寫狀態檔都記進 log。
+
+    為什麼需要它：狀態檔讀不懂的那天，log 是唯一還在的記錄。帳戶 APP 上看到的是
+    使用者自己的部位、OS、PTS 加起來的淨額，看不出哪幾口是 OS 的
+    （2026-11-15 起 PTS 和 OS 在同一個帳戶交易同一個微台合約）。
+    所以這一行要能**照著做**：直接寫出要送的那張單，不是叫人自己推。
+    """
+    from broker import BUY, SELL
+    side = {BUY: "買進", SELL: "賣出"}
+    entry, close = side.get(record.side, record.side), side.get(record.exit_side, record.exit_side)
+    contract = f"{record.order_code}（{record.contract_month}）"
+    seq = f"委託序號 {record.order_seq}" if record.order_seq else "沒有拿到委託序號"
+    if record.exited:
+        how = "自己平倉" if record.close_reason == BY_EXIT else "交易所結算"
+        return f"OS 部位：已了結（{how}），什麼都不用做"
+    if record.uncertain_entry:
+        return (f"OS 部位：不確定——進場委託（{seq}）{entry} {record.requested_lots} 口 {contract}"
+                f"，不知道成交幾口——要平就到券商 APP 查這筆成交了幾口，{close}那個口數")
+    if record.uncertain_exit:
+        return (f"OS 部位：不確定——出場委託（{seq}）{close} {contract}，不知道成交幾口"
+                f"——要平就到券商 APP 查這筆，委託口數減掉成交口數，就是還要{close}的口數")
+    return (f"OS 部位：{entry} {record.lots} 口 {contract}還沒平"
+            f"——要平就{close} {record.lots} 口")
 
 
 def write_position(record: PositionRecord, path: str = STATE_PATH) -> None:
@@ -300,7 +332,5 @@ def write_position(record: PositionRecord, path: str = STATE_PATH) -> None:
             os.unlink(tmp)
         raise
 
-    # ⚠️ 用 %s 不是 %d。lots 在「不確定」時是 None，%d 會讓 logging 內部拋
-    #    TypeError 並**把整行丟掉**——而那正是人在 13:40 排查時要找的那一行。
-    logger.info("狀態檔已更新：%s %s %s 口（狀態 %s）",
-                record.product, record.side, record.lots, record.status)
+    # ⚠️ 狀態檔讀不懂時，告警叫人照這一行平倉（見 `position_line`）。
+    logger.info("狀態檔已更新。%s", position_line(record))

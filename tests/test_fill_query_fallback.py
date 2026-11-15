@@ -290,11 +290,12 @@ def test_an_uncertain_exit_does_not_even_query():
     assert broker.query_calls == []
 
 
-def test_an_uncertain_exit_asks_a_human_to_check_the_account():
-    """訊息要講「先確認帳戶再決定要不要補單」，不是「請照著送這張單」——
+def test_an_uncertain_exit_says_how_to_work_out_what_is_left():
+    """訊息要講「查出場單、只補沒成交的口數」，不是「請照著送這張單」——
     盲送的後果就是反向新倉。"""
     _, notifier, _ = _exit(query_result=2, record=_exit_uncertain_record())
-    assert "確認帳戶實際部位" in notifier.text
+    assert "委託口數減掉成交口數" in notifier.text
+    assert "不要照原本的口數再送一次" in notifier.text
 
 
 def test_an_uncertain_exit_exits_with_an_error():
