@@ -12,11 +12,11 @@
 
 import io
 import logging
-from datetime import date
+from datetime import date, time
 
 import pytest
 
-from broker import BUY, MTX_CODE, SELL, FillUnknown, OpenPrices
+from broker import BUY, MTX_CODE, SELL, FillUnknown, OpenPrices, OrderFailed
 from broker.fake import FakeBroker
 from conftest import CONTRACTS, ON_TIME, RecordingNotifier, make_config, observations_path, state_path
 from main import run_entry, run_exit
@@ -25,26 +25,35 @@ from state import UNCERTAIN, UNCERTAIN_ENTRY, PositionRecord, read_position, wri
 D = date(2026, 8, 10)
 NEXT_DAY = date(2026, 8, 11)
 LONG_OPENS = OpenPrices(tx=42331, mtx=42298, tmf=42265)   # 做多 → 進場買、出場賣
+NO_TRADE_OPENS = OpenPrices(tx=44177, mtx=44142, tmf=44258)
 ENTRY_SEQ = "SEQ0000000001"
 ONLY_THESE_LOTS = "只平這個口數"
 
 
-def _entry(broker, lots=2):
-    notifier = RecordingNotifier()
+class DiscordDown(RecordingNotifier):
+    """Discord 沒送出去：記下要送什麼，但回報失敗。"""
+
+    def __call__(self, payload) -> bool:
+        super().__call__(payload)
+        return False
+
+
+def _entry(broker, lots=2, now=ON_TIME, today=D, notifier=None):
+    notifier = notifier or RecordingNotifier()
     run_entry(
-        make_config(auto_order_enabled=True, order_lots=lots), today=D, broker=broker,
+        make_config(auto_order_enabled=True, order_lots=lots), today=today, broker=broker,
         notify=notifier, sleep=lambda _s: None, state_path=state_path(),
-        observations_path=observations_path(), fetch_official=lambda day: None, now=ON_TIME,
+        observations_path=observations_path(), fetch_official=lambda day: None, now=now,
     )
     return notifier
 
 
-def _exit(broker, record=None, raw_state=None, auto=True, today=D):
+def _exit(broker, record=None, raw_state=None, auto=True, today=D, notifier=None):
     if raw_state is not None:
         io.open(state_path(), "w", encoding="utf-8").write(raw_state)
     elif record is not None:
         write_position(record, path=state_path())
-    notifier = RecordingNotifier()
+    notifier = notifier or RecordingNotifier()
     outcome = run_exit(
         make_config(auto_order_enabled=auto), today=today, broker=broker, notify=notifier,
         sleep=lambda _s: None, state_path=state_path(),
@@ -109,12 +118,38 @@ def test_the_morning_alert_on_settlement_day_says_the_exchange_closes_it():
 
 
 def test_what_the_morning_alert_promises_happens_at_1340():
-    """早上那則說「13:40 會先查，查到就照常平倉（不發訊息）」——照流程跑一次。"""
+    """早上那則說「13:40 會先查，查到就照常平倉，並回一則確認」——照流程跑一次。"""
     _entry(_entry_broker(query_result=None))
     broker = FakeBroker(query_result=2)
     outcome, notifier = _exit(broker)
     assert [(o.side, o.lots) for o in broker.orders] == [(SELL, 2)]
-    assert notifier.sent == [] and outcome.exited
+    assert outcome.exited and outcome.exit_code == 0
+    assert len(notifier.sent) == 1 and "✅" in notifier.text and "成交 2 口" in notifier.text
+
+
+def test_the_1340_lookup_finding_no_fill_says_so():
+    """查到「沒有成交」也要回一句：早上那則叫人等，沉默分不出「沒事」與「出場沒跑」。"""
+    _entry(_entry_broker(query_result=None))
+    outcome, notifier = _exit(FakeBroker(query_result=0))
+    assert "✅" in notifier.text and "沒有成交" in notifier.text, notifier.text
+    assert outcome.exit_code == 0
+
+
+def test_an_entry_rerun_after_1340_says_to_run_the_exit_now():
+    """重開機補跑的早班落在 13:40 之後：「13:40 會先查」已經不對了。"""
+    _entry(_entry_broker())
+    text = _entry(FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS), now=time(14, 0)).text
+    assert "已經過了 13:40" in text and "run_stage.cmd exit" in text, text
+    assert "13:40 出場時會先用委託序號" not in text, text
+
+
+def test_an_entry_rerun_after_the_hand_over_says_nothing_more():
+    """13:40 已經發了「請自行賣出 0～2 口」。重跑早班再叫人「不要自己平」，
+    就是叫人別照 13:40 那則做——部位留著過夜。"""
+    _entry(_entry_broker())
+    _exit(FakeBroker(query_result=None))
+    text = _entry(FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS), now=time(14, 0)).text
+    assert "收不到成交回報" not in text, text
 
 
 # --- 13:40：每一則要人動手的，都寫明買賣別與口數 ---
@@ -126,6 +161,13 @@ def test_an_unresolved_entry_says_which_side_and_up_to_how_many_lots():
     assert "賣出" in text and "0～2 口" in text and ENTRY_SEQ in text, text
     assert ONLY_THESE_LOTS in text, text
     assert "確認帳戶實際部位" not in text, text
+
+
+def test_an_unresolved_entry_with_the_switch_off_does_not_claim_a_lookup():
+    broker = FakeBroker()
+    _, notifier = _exit(broker, _uncertain_entry(), auto=False)
+    assert "沒有向券商查" in notifier.text and "沒能向券商查到" not in notifier.text, notifier.text
+    assert broker.query_calls == []
 
 
 def test_an_unresolved_entry_without_an_order_number_says_how_to_find_it():
@@ -158,14 +200,15 @@ def test_an_unknown_exit_says_how_many_lots_may_be_left_and_which_order_to_look_
 
 def test_an_exit_without_an_order_number_does_not_borrow_the_entrys():
     """出場單沒拿到序號時，狀態檔原本會留著**進場單**的序號。重跑時那則告警就叫人
-    拿進場單去查「委託減成交」——進場單全部成交，算出 0 口，部位就這樣留著過夜。"""
+    拿進場單去查「委託減成交」——進場單全部成交，算出 0 口，部位就這樣留著過夜。
+    第一則沒送到，重跑才會再講一次——所以兩次都看。"""
     broker = FakeBroker(order_error=FillUnknown("沒有序號", order_seq=""))
-    _exit(broker, _record(lots=2))
+    _, first = _exit(broker, _record(lots=2), notifier=DiscordDown())
     assert read_position(path=state_path()).order_seq == ""
 
-    _, notifier = _exit(FakeBroker())
-    text = notifier.text
-    assert ENTRY_SEQ not in text and "沒有拿到委託序號" in text, text
+    _, second = _exit(FakeBroker())
+    for text in (first.text, second.text):
+        assert ENTRY_SEQ not in text and "沒有拿到委託序號" in text, text
 
 
 def test_a_broken_state_file_points_to_the_log_lines_that_hold_the_lots():
@@ -184,6 +227,7 @@ def test_a_broken_state_file_points_to_the_log_lines_that_hold_the_lots():
 def test_every_exit_alert_asking_for_a_manual_close_says_to_close_only_those_lots(broker, record):
     _, notifier = _exit(broker, record)
     assert ONLY_THESE_LOTS in notifier.text, notifier.text
+    assert "這則只發一次" in notifier.text, notifier.text
 
 
 # --- 讀不到部位記錄時，告警指向的那一行 log 真的寫著要平幾口 ---
@@ -210,9 +254,25 @@ def test_the_log_says_nothing_is_left_after_a_normal_exit(caplog):
 
 
 def test_the_log_keeps_the_remainder_after_a_partial_exit(caplog):
+    """告警沒送到：剩下的 1 口還歸程式管，log 寫著要平幾口。"""
+    caplog.set_level(logging.INFO)
+    _exit(FakeBroker(fills=[1]), _record(lots=2), notifier=DiscordDown())
+    assert "要平就賣出 1 口" in _last_position_line(caplog)
+
+
+def test_the_log_says_the_lots_were_handed_over_once_the_alert_arrives(caplog):
     caplog.set_level(logging.INFO)
     _exit(FakeBroker(fills=[1]), _record(lots=2))
-    assert "要平就賣出 1 口" in _last_position_line(caplog)
+    assert "已交給你手動平" in _last_position_line(caplog)
+
+
+def test_the_log_line_names_the_last_trading_day(caplog):
+    """讀不到部位記錄的那天剛好是結算日：照那一行送單，會在下一個月份開新倉。"""
+    caplog.set_level(logging.INFO)
+    _entry(FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS))
+    assert "最後交易日 20260819" in _last_position_line(caplog)
+    _, notifier = _exit(FakeBroker(), raw_state="{ 寫到一半")
+    assert "最後交易日」是 20260810 或更早" in notifier.text, notifier.text
 
 
 def test_the_log_names_the_order_to_look_up_when_the_entry_is_uncertain(caplog):
@@ -238,8 +298,61 @@ def test_a_leftover_position_says_what_to_send_if_nothing_was_done_yet():
     write_position(_record(trading_day=20260807, lots=2), path=state_path())
     text = _entry(FakeBroker(script=[LONG_OPENS], contracts=CONTRACTS)).text
     assert "沒有收掉" in text
-    assert "賣出 2 口 MTX08" in text and "已經照著平了" in text, text
+    assert "賣出 2 口 MTX08" in text and "已經處理過了" in text, text
     assert ONLY_THESE_LOTS in text, text
+
+
+def test_a_leftover_position_is_mentioned_only_once():
+    """記錄要等 OS 下次成交才會被覆蓋。不記下「講過了」的話，沒成交的日子每天早上
+    都會再叫人平一次——照做兩次就是反向新倉。"""
+    write_position(_record(trading_day=20260807, lots=2), path=state_path())
+    first = _entry(FakeBroker(script=[NO_TRADE_OPENS], contracts=CONTRACTS))
+    second = _entry(FakeBroker(script=[NO_TRADE_OPENS], contracts=CONTRACTS), today=NEXT_DAY)
+    assert "沒有收掉" in first.text
+    assert "沒有收掉" not in second.text, second.text
+
+
+def test_a_leftover_position_is_mentioned_again_if_discord_was_down():
+    write_position(_record(trading_day=20260807, lots=2), path=state_path())
+    _entry(FakeBroker(script=[NO_TRADE_OPENS], contracts=CONTRACTS), notifier=DiscordDown())
+    second = _entry(FakeBroker(script=[NO_TRADE_OPENS], contracts=CONTRACTS), today=NEXT_DAY)
+    assert "沒有收掉" in second.text
+
+
+# --- 交給使用者之後：重跑出場不送單、也不再叫人平一次（SPEC 使用者故事 46）---
+
+
+HAND_OVERS = [
+    ("出場登入失敗", FakeBroker(login_error=RuntimeError("斷線")), _record(), True),
+    ("委託送不出去", FakeBroker(order_error=OrderFailed("拒絕")), _record(), True),
+    ("只成交一部分", FakeBroker(fills=[1]), _record(), True),
+    ("不確定持有幾口", FakeBroker(query_result=None), _uncertain_entry(), True),
+    ("出場收不到回報", FakeBroker(order_error=FillUnknown("逾時", order_seq="EXIT0001")),
+     _record(), True),
+    ("開關盤中被關掉", FakeBroker(), _record(), False),
+]
+
+
+@pytest.mark.parametrize("broker, record, auto", [h[1:] for h in HAND_OVERS],
+                         ids=[h[0] for h in HAND_OVERS])
+def test_a_rerun_after_a_manual_close_alert_sends_nothing_and_says_nothing(broker, record, auto):
+    """使用者照告警平過，重跑出場（或把開關打開再跑）就不可以再平一次，也不可以再叫他平。
+    `FakeBroker()` 沒安排查詢：重跑若去查，會直接紅。"""
+    _, first = _exit(broker, record, auto=auto)
+    assert first.sent, "第一輪應該要發告警"
+
+    again = FakeBroker()
+    outcome, second = _exit(again)
+    assert again.orders == [] and second.sent == [], second.text
+    assert outcome.exit_code == 0
+
+
+def test_a_manual_close_alert_that_did_not_arrive_leaves_the_lots_to_the_rerun():
+    """告警沒送到，使用者不知道這件事——重跑還要能自己平掉。"""
+    _exit(FakeBroker(login_error=RuntimeError("斷線")), _record(lots=2), notifier=DiscordDown())
+    again = FakeBroker()
+    _exit(again)
+    assert [(o.side, o.lots) for o in again.orders] == [(SELL, 2)]
 
 
 def test_a_leftover_uncertain_entry_names_the_order_to_look_up():

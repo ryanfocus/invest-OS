@@ -649,7 +649,10 @@ def test_saying_something_and_a_non_zero_exit_code_go_together(label):
     （狀態檔讀不懂、查出早上沒成交、出場登入失敗）。
     """
     outcome, notifier, _broker = _run(**_scenario(label))
-    said_something = notifier.sent != []
+    # 唯一的例外是 `_finish(note=...)`：早上那筆「收不到成交回報」，13:40 查到答案並了結時
+    # 回的那一句「✅ 早上那筆查到了」——講了，但不算有事（2026-11-15）。
+    alerts = [p for p in notifier.sent if "✅" not in p["content"]]
+    said_something = alerts != []
     assert said_something == (outcome.exit_code != 0), (
         f"「{label}」違反規則：發了 {len(notifier.sent)} 則訊息，"
         f"但 exit_code={outcome.exit_code}"

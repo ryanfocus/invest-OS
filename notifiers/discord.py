@@ -36,8 +36,9 @@ _SIDE_TEXT = {BUY: "買進", SELL: "賣出"}
 # 使用者的原話：「只要明確的寫要平幾口，手動處理就不會報錯」。
 _ONLY_THESE_LOTS = ("只平這個口數，不要照 APP 上的部位全平："
                     "帳上可能還有你自己的部位或其他程式的口數。")
-_DEADLINE = ("請在 13:45 日盤收盤前送出；來不及就在夜盤（15:00 開盤）送出。"
-             "之後不會有程式再處理這筆。")
+_DEADLINE = "請在 13:45 日盤收盤前送出；來不及就在夜盤（15:00 開盤）送出。"
+# 出場那班的告警送到之後，那些口數就記成交給使用者（`handed_over`），所以這句是真的。
+_HANDED_OVER = "這則只發一次，程式不會再處理這幾口（重跑出場也不會送單）。"
 
 
 def _contract(record) -> str:
@@ -116,9 +117,10 @@ def build_stale_position_payload(record, trading_date: date) -> dict:
     帳上的舊部位**安靜地**吃掉。在那之前「新倉」會退單（代碼 980），
     大聲失敗——但那是券商規則的副作用，不是我們的設計。
 
-    ⚠️ **只在「那天沒收到任何告警」時才叫人送單**（2026-11-15）。那天 13:40 若發過
-       告警（出場失敗、只成交一部分、不確定……），使用者可能已經照著平了——
-       記錄沒有因此改變，再叫他平一次就是反向新倉。
+    ⚠️ **只發一次，而且只發給「沒被告知過」的部位**（2026-11-15）。13:40 的告警送到時，
+       那些口數就記成交給使用者（`handed_over`），不會走到這裡；這則送到之後
+       呼叫端也照樣記下來。所以會收到這則的，只有那天 13:40 沒跑、中途結束、或告警
+       沒送出去的部位——不記的話，沒成交的日子每天早上都會再叫人平一次。
     ⚠️ **合約已經結算就不叫人送單**：交易所已經平掉了，送單只會在下一個月份開新倉。
     """
     day = str(record.trading_day)
@@ -154,16 +156,15 @@ def build_stale_position_payload(record, trading_date: date) -> dict:
                      "**不用送任何委託**。")
     else:
         lines += [
-            "那天 13:40 OS 如果發過告警（出場失敗、只成交一部分、不確定……），照那則處理；"
-            "已經照著平了，就什麼都不用做。",
-            f"那天沒有收到 OS 的任何告警（例如電腦沒開），就是還在帳上。{action}",
+            "那天 13:40 OS 沒有平倉，也沒有成功發出告警叫你處理"
+            "（例如電腦沒開、程式中途結束、Discord 沒送出去），所以它很可能還在帳上。",
+            action,
             _ONLY_THESE_LOTS,
+            "如果其實已經處理過了，就什麼都不用做。",
         ]
     lines += [
         "",
-        "今天照常交易——程式進出等量，不會動到它。",
-        "",
-        "今天若有成交，這筆紀錄會被覆蓋，之後就不會再提醒。",
+        "這則只發一次。今天照常交易——程式進出等量，不會動到它。",
     ]
     return {"content": "\n".join(lines)}
 
@@ -191,7 +192,11 @@ def build_entry_too_late_payload(signal: str, ran_at, cutoff, trading_date: date
     return {"content": "\n".join(lines)}
 
 
-def build_fill_unknown_payload(record, reason: str, trading_date: date) -> dict:
+_RUN_EXIT_BY_HAND = "手動執行一次 OS 的出場（run_stage.cmd exit）"
+
+
+def build_fill_unknown_payload(record, reason: str, trading_date: date, *,
+                               late: bool = False) -> dict:
     """**委託送出去了，但不知道成交幾口。** 純函式，無 I/O。
 
     與「下單失敗」刻意用不同的字眼與圖示：那一則確定沒有部位。
@@ -202,6 +207,11 @@ def build_fill_unknown_payload(record, reason: str, trading_date: date) -> dict:
        查不到時 13:40 會發 `build_exit_blocked_payload`，那一則才寫明要平幾口——
        **要人動手的指示只有一個出處**，兩則都叫人平，照做兩次就是反向新倉。
        等到 13:40 不吃虧：OS 本來就持有到 13:40。
+       13:40 查到並平倉時會回一句（`build_entry_resolved_payload`），所以兩則都沒收到
+       就代表出場那班沒跑——這一則要講那時候怎麼辦。
+
+    `late`：早班在 13:40 之後重跑（重開機補跑），而這筆還沒交給使用者。那時「13:40 會先查」
+    已經不對了，要講的是現在去跑一次出場（2026-11-15 安全審查）。
     """
     lines = [
         f"{trading_date.strftime('%Y/%m/%d')} OS",
@@ -211,24 +221,50 @@ def build_fill_unknown_payload(record, reason: str, trading_date: date) -> dict:
         f"委託序號 {record.order_seq or '（未取得）'}",
         f"原因：{reason}",
         "",
-        "**現在不用處理，也不要自己平。**",
     ]
     if record.last_trading_day == record.trading_day:
         # 結算日出場那班不送單也不查（`main.run_exit`），部位由交易所結算。
-        lines.append("今天是結算日：OS 的部位會由交易所以最後結算價平掉，不必送任何委託。"
-                     "出場那班會再發一則，到時用委託序號對帳就好。")
-    elif record.order_seq:
         lines += [
-            "13:40 出場時會先用委託序號向券商查這筆成交了幾口：查到就照常平倉"
-            "（和平常一樣不發訊息）；查不到會再發一則「不確定持有幾口」，"
-            "寫明要平幾口，到時照那則做。",
-            "先自己平的話，13:40 查到成交會再平一次，開出一個反向新倉。",
+            "**現在不用處理，也不要自己平。**",
+            "今天是結算日：OS 的部位會由交易所以最後結算價平掉，不必送任何委託。"
+            "出場那班會再發一則，到時用委託序號對帳就好。",
+        ]
+    elif late:
+        lines += [
+            "**不要自己平。**已經過了 13:40，出場那班沒有處理這筆（電腦沒開，或程式中途結束）。",
+            f"請{_RUN_EXIT_BY_HAND}：它會先用委託序號查，查到就平倉並回一則確認；"
+            "查不到會發一則「不確定持有幾口」，寫明要平幾口，照那則做。",
         ]
     else:
-        lines.append(
-            "這筆沒有拿到委託序號，13:40 查不到成交了幾口，會再發一則「不確定持有幾口」，"
-            "寫明怎麼找這筆委託、要平幾口，到時照那則做。")
+        lines.append("**現在不用處理，也不要自己平。**")
+        if record.order_seq:
+            lines += [
+                "13:40 出場時會先用委託序號向券商查這筆成交了幾口：查到就照常平倉，並回一則確認；"
+                "查不到會再發一則「不確定持有幾口」，寫明要平幾口，到時照那則做。",
+                "先自己平的話，13:40 查到成交會再平一次，開出一個反向新倉。",
+            ]
+        else:
+            lines.append(
+                "這筆沒有拿到委託序號，13:40 查不到成交了幾口，會再發一則「不確定持有幾口」，"
+                "寫明怎麼找這筆委託、要平幾口，到時照那則做。")
+        lines.append(f"13:45 前這兩種都沒收到，代表出場那班沒跑：請{_RUN_EXIT_BY_HAND}。")
     return {"content": "\n".join(lines)}
+
+
+def build_entry_resolved_payload(record, lots: int, trading_date: date) -> dict:
+    """早上那筆「收不到成交回報」，13:40 查到了答案並照常了結。
+
+    **例行出場不發訊息，這是唯一的例外**：早上那則叫人「現在不要平，13:40 會先查」，
+    不回一句的話，13:40 的沉默分不出「平好了」與「出場沒跑」（2026-11-15 安全審查）。
+    """
+    head = f"{trading_date.strftime('%Y/%m/%d')} OS"
+    seq = record.order_seq or "（未取得）"
+    if lots == 0:
+        body = f"✅ 早上那筆（委託序號 {seq}）查到了：**沒有成交**，今天沒有部位，什麼都不用做。"
+    else:
+        body = (f"✅ 早上那筆（委託序號 {seq}）查到了：成交 {lots} 口，"
+                f"13:40 已照常平倉，什麼都不用做。")
+    return {"content": f"{head}\n{body}"}
 
 
 def build_exit_failed_payload(record, reason: str, trading_date: date) -> dict:
@@ -247,6 +283,7 @@ def build_exit_failed_payload(record, reason: str, trading_date: date) -> dict:
         f"{record.order_code}**（{record.contract_month}）",
         _ONLY_THESE_LOTS,
         _DEADLINE,
+        _HANDED_OVER,
         "",
         f"原因：{reason}",
     ]
@@ -269,11 +306,12 @@ def build_partial_exit_payload(record, remaining: int, trading_date: date) -> di
         f"{record.order_code}**（{record.contract_month}）",
         _ONLY_THESE_LOTS,
         _DEADLINE,
+        _HANDED_OVER,
     ]
     return {"content": "\n".join(lines)}
 
 
-def build_exit_blocked_payload(record, trading_date: date) -> dict:
+def build_exit_blocked_payload(record, trading_date: date, *, looked_up: bool = True) -> dict:
     """早上那筆進場單是「不確定」，13:40 也沒能查到成交幾口，所以**刻意不出場**。
 
     這不是失敗，是拒絕猜測——不知道持有幾口就下單，可能開出反向新倉，
@@ -283,6 +321,8 @@ def build_exit_blocked_payload(record, trading_date: date) -> dict:
     所以訊息寫明要送的單——方向、合約、口數的範圍、去哪裡查確切的數字——
     而不是叫人「確認帳戶實際部位」：APP 上的淨部位混著使用者自己與 PTS 的口數
     （2026-11-15）。
+
+    `looked_up=False`：自動下單開關關著，13:40 刻意不查（不碰下單元件），不可以講成「查不到」。
     """
     side = _SIDE_TEXT.get(record.side, record.side)
     close = _SIDE_TEXT.get(record.exit_side, record.exit_side)
@@ -291,7 +331,9 @@ def build_exit_blocked_payload(record, trading_date: date) -> dict:
         "❓ **不確定持有幾口，因此沒有自動平倉**",
         "",
         f"早上送出過 {_contract(record)}{side} {record.requested_lots} 口的委託，"
-        "但沒有收到成交回報，13:40 也沒能向券商查到成交了幾口。",
+        "但沒有收到成交回報，"
+        + ("13:40 也沒能向券商查到成交了幾口。" if looked_up
+           else "而自動下單已關閉，13:40 沒有向券商查。"),
         f"委託序號：{record.order_seq or '（未取得）'}",
         "",
         f"**請自行{close} {_contract(record)}，口數＝這筆委託實際成交的口數"
@@ -301,6 +343,7 @@ def build_exit_blocked_payload(record, trading_date: date) -> dict:
         + f"成交了幾口，就{close}幾口；一口都沒成交就什麼都不用做。",
         _ONLY_THESE_LOTS,
         _DEADLINE,
+        _HANDED_OVER,
     ]
     return {"content": "\n".join(lines)}
 
@@ -321,6 +364,7 @@ def build_exit_switched_off_payload(record, trading_date: date) -> dict:
         f"如果你已經自己平掉這 {record.lots} 口，就什麼都不用做。",
         _ONLY_THESE_LOTS,
         _DEADLINE,
+        _HANDED_OVER,
     ]
     return {"content": "\n".join(lines)}
 
@@ -401,6 +445,7 @@ def build_exit_unknown_payload(record, reason: str, trading_date: date, *,
         "不要照原本的口數再送一次：若原本已經平掉，就是開出反向新倉。",
         _ONLY_THESE_LOTS,
         _DEADLINE,
+        _HANDED_OVER,
     ]
     return {"content": "\n".join(lines)}
 
@@ -510,6 +555,10 @@ def build_exit_state_broken_payload(reason: str, trading_date: date) -> dict:
     （`state.position_line`）。不叫人「確認帳戶」：APP 上的淨部位混著使用者自己
     與 PTS 的口數，看不出哪幾口是 OS 的（2026-11-15）。
     先看出場、再看進場：同一天出場一定在進場之後，最後寫的那一行才是現況。
+
+    ⚠️ 讀不到檔就記不下「已交給使用者」，重跑會再發這一則——所以要講「做過就不用再做」。
+    ⚠️ 那一行寫著合約的最後交易日：今天就是（或已過）最後交易日時，合約已經或即將由交易所
+       結算，照那一行送單只會在下一個月份開新倉（2026-11-15 安全審查）。
     """
     day = trading_date.strftime("%Y%m%d")
     lines = [
@@ -519,13 +568,17 @@ def build_exit_state_broken_payload(reason: str, trading_date: date) -> dict:
         "",
         "系統無法判斷今天有沒有進場，因此沒有送出任何委託。",
         "",
-        f"**OS 今天的部位記在 log 裡：**先看 `logs\\exit-{day}.log`，"
-        f"沒有再看 `logs\\entry-{day}.log`，找最後一行「OS 部位：」，照那一行寫的做：",
+        f"**OS 今天的部位記在 log 裡：**先在 `logs\\exit-{day}.log` 找最後一行「OS 部位：」，"
+        f"那份沒有這一行，再到 `logs\\entry-{day}.log` 找，照那一行寫的做：",
+        f"・那一行的「最後交易日」是 {day} 或更早：合約由交易所結算，什麼都不用送。",
         "・寫「還沒平——要平就買進／賣出 N 口」：自行送出那張單。",
         "・寫「不確定」：照那一行，到券商 APP 用委託序號查要平幾口。",
+        "・寫「已交給你手動平」：照當時那則 OS 告警做，做過了就不用再做。",
         "・寫「已了結」或「沒有」，或兩份 log 都找不到這一行：今天沒有 OS 的部位，什麼都不用做。",
+        "（這一班若是隔天才補跑，看前一個交易日的那兩份 log。）",
         _ONLY_THESE_LOTS,
         _DEADLINE,
+        "已經照之前同樣的一則平過，就什麼都不用做。",
     ]
     return {"content": "\n".join(lines)}
 

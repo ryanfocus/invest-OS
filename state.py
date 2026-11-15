@@ -128,6 +128,14 @@ class PositionRecord:
     # 2026-11-15 拿掉了（PTS 在同一個帳戶交易同一個合約，倉別反映的是整個帳戶，
     # 見 `main.run_exit`）。欄位留著：線上的狀態檔已經有它，人工對帳時也看得到。
     entry_position_type: str = ""
+    # **已交給使用者手動平**（2026-11-15）：一則寫明「買進／賣出 幾口」的告警確定送到了。
+    # 之後程式不再對這些口數送單、也不再叫人平一次——使用者照第一則平過，重跑出場或
+    # 隔天早上的提醒再叫他平，就是反向新倉（SPEC 使用者故事 46）。告警沒送到就不記，
+    # 留給重跑或隔天早上的提醒。
+    #
+    # 刻意不併進 `exited`：那個欄位回答「部位還在不在」，交出去的口數可能還在帳上，
+    # 只是不歸程式管了。
+    handed_over: bool = False
 
     def __post_init__(self) -> None:
         """殘缺或自相矛盾的記錄比沒有記錄更糟——出場那一班會拿著它去下單。
@@ -295,8 +303,13 @@ def position_line(record: PositionRecord) -> str:
     from broker import BUY, SELL
     side = {BUY: "買進", SELL: "賣出"}
     entry, close = side.get(record.side, record.side), side.get(record.exit_side, record.exit_side)
-    contract = f"{record.order_code}（{record.contract_month}）"
+    # 最後交易日寫進來：那天 13:30 之後合約已由交易所結算，照這一行送單只會在下個月份開新倉。
+    contract = (f"{record.order_code}（{record.contract_month}，"
+                f"最後交易日 {record.last_trading_day}）")
     seq = f"委託序號 {record.order_seq}" if record.order_seq else "沒有拿到委託序號"
+    if record.handed_over:
+        return ("OS 部位：已交給你手動平——照當時那則 OS 告警做，做過了就什麼都不用做；"
+                "程式不會再送單")
     if record.exited:
         how = "自己平倉" if record.close_reason == BY_EXIT else "交易所結算"
         return f"OS 部位：已了結（{how}），什麼都不用做"

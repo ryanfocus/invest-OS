@@ -62,6 +62,7 @@ from state import (
     write_position,
 )
 from notifiers.discord import (
+    build_entry_resolved_payload,
     build_exit_blocked_payload,
     build_exit_failed_payload,
     build_exit_state_broken_payload,
@@ -501,7 +502,8 @@ def _run_strategy(
 
     if (existing is not None
             and existing.trading_day != to_yyyymmdd(today)
-            and not existing.exited):
+            and not existing.exited
+            and not existing.handed_over):
         # **前一個交易日的部位沒有收掉。只提醒，不擋交易。**
         #
         # 為什麼需要：2026-08-24 進場倉別改成「自動」之後，今天的反向委託
@@ -518,13 +520,23 @@ def _run_strategy(
         #    就再也不會看那類訊息了。
         logger.warning("狀態檔裡有 %s 未出場的記錄（%s %s），發出提醒",
                        existing.trading_day, existing.side, existing.order_code)
-        _send(build_stale_position_payload(existing, today))
+        # ⚠️ **只提醒一次。** 這則寫明「買進／賣出 幾口」，而記錄要等 OS 下次成交才會
+        #    被覆蓋——不記下來的話，沒成交的日子每天早上都會再叫人平一次，
+        #    照做兩次就是反向新倉（2026-11-15 安全審查）。送到了才記。
+        if _send(build_stale_position_payload(existing, today)):
+            try:
+                write_position(replace(existing, handed_over=True), path=state_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("記不下「已交給使用者手動平」（%s）：%s——明天早上會再提醒一次",
+                             type(exc).__name__, exc)
 
     if existing is not None and existing.trading_day == to_yyyymmdd(today):
         logger.info("今日已有部位記錄（%s %s %s 口，狀態 %s），不重複進場",
                     existing.product, existing.side, existing.lots, existing.status)
 
-        if existing.uncertain_entry:
+        # `not existing.exited`：13:40 已經交給使用者（或結算日已由交易所了結）的記錄，
+        # 重跑早班不可以再叫人「現在不要平，等 13:40」——那會蓋過 13:40 那則的指示。
+        if existing.uncertain_entry and not existing.exited and not existing.handed_over:
             # ⚠️ **不確定的時候不可以靜默。** 人會再跑一次，多半正是因為想知道
             #    現在怎麼了；這時什麼都不說，看起來就像「已經沒事了」，
             #    但帳上可能還有一個沒人管的部位。
@@ -539,7 +551,8 @@ def _run_strategy(
             #    「帳上可能有一個沒人管的部位」那一種——宣稱通知了但其實沒有，
             #    等於在結果裡埋一個假的安心。
             #    這條規則 `_order_failed` 的 docstring 早就寫下了，這裡漏了。
-            notified = _send(build_fill_unknown_payload(existing, reason, today))
+            notified = _send(build_fill_unknown_payload(
+                existing, reason, today, late=now >= _EXIT_TIME))
             return EntryOutcome(
                 signal=None, opens=None, notified=notified, exit_code=1, failure=reason
             )
@@ -678,6 +691,11 @@ def _run_strategy(
     )
 
 
+# 出場那班的排程時刻（`tools/setup_schedule.ps1`）。早班重跑時拿來判斷「13:40 會先查」
+# 這句話還對不對——過了這個時刻，那一班可能已經跑過、也可能沒跑（電腦沒開）。
+_EXIT_TIME = clock(13, 40)
+
+
 @dataclass(frozen=True)
 class ExitOutcome:
     """出場流程的結果。
@@ -718,7 +736,7 @@ def run_exit(
     """
 
     def _finish(payload=None, *, remaining, exited=False,
-                failure=None, skipped=False) -> ExitOutcome:
+                failure=None, skipped=False, note=None) -> ExitOutcome:
         """**出場那班唯一的出口。**
 
         它代表一條規則：**有東西要講 ⟺ 非零結束碼**。
@@ -731,12 +749,17 @@ def run_exit(
         但 `exit_code` 仍然是 1——那一天仍然有事情不對勁，
         只是使用者沒被通知到。寫成「notified ⟺ exit_code」的話，
         關掉 Discord 會讓所有異常的一天看起來都正常。
+
+        `note` 是唯一的例外：**講了，但不算有事**。只有一種——早上那筆「收不到成交
+        回報」，13:40 查到了答案並照常了結（2026-11-15）。早上那則叫人「現在不要平，
+        13:40 會先查」，不回一句的話，13:40 的沉默分不出「平好了」與「出場沒跑」。
         """
+        message = payload if payload is not None else note
         return ExitOutcome(
             exited=exited,
             remaining=remaining,
-            notified=(_notify_if_enabled(config, notify, payload)
-                      if payload is not None else False),
+            notified=(_notify_if_enabled(config, notify, message)
+                      if message is not None else False),
             exit_code=0 if payload is None else 1,
             failure=failure,
             skipped=skipped,
@@ -745,6 +768,24 @@ def run_exit(
     def _quiet() -> ExitOutcome:
         """今天沒有事情要做，也沒有事情要講。"""
         return _finish(remaining=0, skipped=True)
+
+    def _hand_over(payload, record, *, remaining, failure) -> ExitOutcome:
+        """發出一則要使用者手動平倉的告警，**送到了**就把這些口數記成交給他（`handed_over`）。
+
+        記下來之後，重跑出場不再送單、也不再叫他平一次，隔天早上也不再提醒——
+        他照第一則平過，再平一次就是反向新倉（SPEC 使用者故事 46）。
+        沒送到就不記：他不知道這件事，重跑或隔天早上的提醒還要能接手。
+
+        寫檔失敗不往外拋：告警已經送出去了，那才是這一班最重要的事。
+        """
+        outcome = _finish(payload, remaining=remaining, failure=failure)
+        if outcome.notified:
+            try:
+                write_position(replace(record, handed_over=True), path=state_path)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("記不下「已交給使用者手動平」（%s）：%s——重跑出場可能再送一次單",
+                             type(exc).__name__, exc)
+        return outcome
 
     if not is_trading_day(today):
         logger.info("%s 非交易日，靜默結束", today)
@@ -762,6 +803,9 @@ def run_exit(
 
     if record is None or record.trading_day != to_yyyymmdd(today):
         logger.info("沒有今日的部位記錄，不做任何事")
+        return _quiet()
+    if record.handed_over:
+        logger.info("今日部位已交給使用者手動平（告警已送出），不送單、不再告警")
         return _quiet()
     if record.exited:
         logger.info("今日部位已出場，不重複送單")
@@ -812,10 +856,12 @@ def run_exit(
         # 可能已經成交的單，絕不可以自動再送一次。
         reason = "出場委託的成交狀況不確定，未重複送單"
         logger.error("%s", reason)
-        return _finish(build_exit_unknown_payload(record, reason, today,
-                                                  exit_seq=record.order_seq),
-                       remaining=None, failure=reason)
+        # 走到這裡代表告警上一次沒送到（送到了就記成交給使用者，在上面就回去了）。
+        return _hand_over(build_exit_unknown_payload(record, reason, today,
+                                                     exit_seq=record.order_seq),
+                          record, remaining=None, failure=reason)
 
+    resolved = False     # 早上那筆不確定，這一班查到了答案（照常了結後要回一句）
     if record.is_uncertain:
         # 走到這裡代表不確定的是**進場**那一筆（`uncertain_entry`）。
         # 舉手投降之前先問一次（ticket 09）——早上推播沒到不代表現在也查不到，
@@ -832,8 +878,9 @@ def run_exit(
             # 查詢也答不出來 → 走 ticket 05 定的契約：不知道持有幾口就不准下單。
             reason = "不確定持有幾口，未自動出場"
             logger.error("%s", reason)
-            return _finish(build_exit_blocked_payload(record, today),
-                           remaining=None, failure=reason)
+            return _hand_over(build_exit_blocked_payload(
+                                  record, today, looked_up=config.auto_order_enabled),
+                              record, remaining=None, failure=reason)
         if lots == 0:
             # **確定早上沒成交**——沒有部位，今天什麼都不用做，也不必打擾人。
             # 與「查不到」是完全不同的答案。
@@ -843,10 +890,12 @@ def run_exit(
             # 留著它等於讓檔案說謊：它說「不知道」，但我們已經知道了。
             logger.info("成交查詢確認早上未成交，今日無部位")
             clear_position(path=state_path)
-            return _quiet()
+            return _finish(remaining=0, skipped=True,
+                           note=build_entry_resolved_payload(record, 0, today))
         logger.info("成交查詢補上了答案：早上成交 %d 口，照常出場", lots)
         record = replace(record, lots=lots, status=CONFIRMED, uncertain_stage="")
         write_position(record, path=state_path)
+        resolved = True
 
     if not config.auto_order_enabled:
         # 開關關著時進場不會寫記錄，所以「有記錄 + 開關關著」代表有人中途關掉了。
@@ -855,8 +904,8 @@ def run_exit(
         reason = "自動下單已關閉，但帳上仍有今日部位記錄，未自動出場"
         logger.error("%s", reason)
         # 走到這裡的記錄一定是已確認的（不確定的在上面就回去了），口數是知道的。
-        return _finish(build_exit_switched_off_payload(record, today),
-                       remaining=record.lots, failure=reason)
+        return _hand_over(build_exit_switched_off_payload(record, today),
+                          record, remaining=record.lots, failure=reason)
 
     request = OrderRequest(
         product=record.product,
@@ -875,8 +924,8 @@ def run_exit(
     except Exception as exc:  # noqa: BLE001
         reason = f"出場登入失敗：{exc}"
         logger.error("%s", reason)
-        return _finish(build_exit_failed_payload(record, str(exc), today),
-                       remaining=record.lots, failure=reason)
+        return _hand_over(build_exit_failed_payload(record, str(exc), today),
+                          record, remaining=record.lots, failure=reason)
 
     result, last_error = None, None
     for attempt in range(1, attempts + 1):
@@ -892,8 +941,7 @@ def run_exit(
             logger.error("%s", reason)
             # 不知道平掉沒有 → 記成「不確定」。維持 CONFIRMED 的話，記錄上會是
             # 「有 N 口、還沒出場」，那是一個看起來很確定的錯誤。
-            write_position(
-                replace(record, lots=None, status=UNCERTAIN,
+            uncertain = replace(record, lots=None, status=UNCERTAIN,
                         # **標明不確定的是出場那一筆。** 少了它，重跑時會被當成
                         # 進場的不確定去查詢與復原，然後再送一次反向委託。
                         uncertain_stage=UNCERTAIN_EXIT,
@@ -901,13 +949,12 @@ def run_exit(
                         # 早上進場單的序號（`or record.order_seq`）——重跑時的告警就
                         # 叫人拿進場單去查「委託減成交」，進場單全部成交，算出 0 口要補，
                         # 部位就這樣過夜（2026-11-15 拿掉）。
-                        order_seq=exc.order_seq),
-                path=state_path,
-            )
-            return _finish(build_exit_unknown_payload(record, str(exc), today,
-                                                      exit_seq=exc.order_seq,
-                                                      known_filled=exc.known_filled),
-                           remaining=None, failure=reason)
+                        order_seq=exc.order_seq)
+            write_position(uncertain, path=state_path)
+            return _hand_over(build_exit_unknown_payload(record, str(exc), today,
+                                                         exit_seq=exc.order_seq,
+                                                         known_filled=exc.known_filled),
+                              uncertain, remaining=None, failure=reason)
         except OrderFailed as exc:
             # 確定沒送出去 → 重試是安全的，而且應該做。
             last_error = exc
@@ -921,17 +968,18 @@ def run_exit(
 
     if result is None:
         reason = f"出場委託送出失敗：{last_error}"
-        return _finish(build_exit_failed_payload(record, str(last_error), today),
-                       remaining=record.lots, failure=reason)
+        return _hand_over(build_exit_failed_payload(record, str(last_error), today),
+                          record, remaining=record.lots, failure=reason)
 
     remaining = record.lots - result.filled_lots
     if remaining > 0:
         # 部分成交**不算出場成功**。狀態檔記下還剩幾口，隔日對帳才看得到真相。
         reason = f"出場只成交 {result.filled_lots} 口，還剩 {remaining} 口"
         logger.error("%s", reason)
-        write_position(replace(record, lots=remaining), path=state_path)
-        return _finish(build_partial_exit_payload(record, remaining, today),
-                       remaining=remaining, failure=reason)
+        left = replace(record, lots=remaining)
+        write_position(left, path=state_path)
+        return _hand_over(build_partial_exit_payload(record, remaining, today),
+                          left, remaining=remaining, failure=reason)
 
     logger.info("出場完成，平掉 %d 口", result.filled_lots)
     write_position(replace(record, exited=True, close_reason=BY_EXIT), path=state_path)
@@ -943,7 +991,10 @@ def run_exit(
     #    它防的「早上那口在盤中被手動平掉」改由使用規則擋：盤中不要手動平 OS 的口數。
 
     # 例行出場不發 Discord——使用者要求每天只有一則訊息（早上那則訊號）。
-    return _finish(remaining=0, exited=True)
+    # 唯一的例外是早上叫人「現在不要平，13:40 會先查」的那天：回一句查到了、平好了。
+    return _finish(remaining=0, exited=True,
+                   note=build_entry_resolved_payload(record, record.lots, today)
+                   if resolved else None)
 
 
 def run_account(broker, out=print) -> int:
