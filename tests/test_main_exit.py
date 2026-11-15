@@ -548,91 +548,37 @@ def test_the_unknown_exit_message_never_prints_a_placeholder_for_missing_lots():
     assert broker.orders == [], "不確定的出場單絕不可以再送一次"
 
 
-# --- 進出場的倉別必須相反 ---
+# --- 券商回報的倉別不拿來判斷 ---
 #
-# 券商每一筆回報都會說它對淨部位做了什麼：開倉（N）或平倉（O）。
-# 早上開了就下午平，早上平掉別人的（跨越零）下午就開一口還回去——
-# **必然相反**。三天的實機資料都是這樣（8/21、8/24、8/25）——
-# ⚠️ 但那三天都是 1 口。2026-09-02 的 2 口混合單推翻了「必然」，見下方那條測試。
+# 2026-11-15 起拿掉「進出場的倉別必須相反」那項檢查。券商的倉別（N 新倉／O 平倉）是看
+# **整個帳戶的淨部位**判斷的。PTS 在同一個帳戶交易同一個微台合約，它的單夾在 OS 早上與下午
+# 兩筆之間，會改變 OS 這兩筆被標成什麼：一切正常也可能兩筆都是 N（誤報），出了事也可能
+# 一開一平（漏報）。
 #
-# 兩邊一樣代表下午那筆**沒有平到任何東西**。最常見的成因是早上那口在盤中
-# 被手動平掉了，於是下午的反向委託開出一個沒人管的新部位——而程式會以為
-# 今天結束了、記 `exited: true`、下班。那一口直接進夜盤。
+#     開盤前  使用者固定持有          +1
+#     08:50   PTS 賣 1                 0
+#     08:50   OS  賣 1                −1    OS 這筆：N
+#     13:25   PTS 買回 1               0
+#     13:40   OS  買回 1              +1    OS 這筆：N   ← 帳戶回到 +1，一切正常
 #
-# ⚠️ 這是**偵測**不是預防。單已經送出去了，能做的只有讓人當天下午就知道。
+# 這項檢查本來就只在 1 口時做（2 口以上券商會把一張單拆成平倉＋新倉而只回一個旗標，
+# 2026-09-02 誤報過）；口數設 2 的那段時間，它已經是關著的。
+#
+# 拿掉的代價：「早上那口在盤中被手動平掉，下午的反向委託開出一口沒人管的部位」不再被偵測。
+# 防它的是使用規則：盤中不要手動平 OS 的口數（docs/MESSAGES.md）。
 
 
-def test_matching_position_types_raise_the_alarm():
-    """早上開倉、下午也開倉 → 什麼都沒平掉，發告警。"""
-    _, notifier, _ = _run(_record(lots=1, requested_lots=1, entry_position_type="N"),
-                          broker=FakeBroker(position_type="N"))
-    assert "沒有平到" in notifier.text, f"沒有發告警：{notifier.text}"
-
-
-def test_more_than_one_lot_makes_the_flags_uninterpretable():
-    """**2 口以上的單不做這個檢查。**
-
-    🔴 2026-09-02 實機誤報。使用者持有 1 口多單、程式賣 2 口：
-
-        08:50  SELL 2 @46650   券商記 N（新倉）
-        13:40  BUY  2 @46142   券商記 N（新倉）
-
-    兩筆都是 N，檢查開火——但單有成交、部位有平掉、帳戶也回到 1 口多單。
-    **是檢查錯了，不是交易錯了。**
-
-    成因：券商必須把「賣 2 口」拆成「平掉使用者那 1 口 ＋ 開 1 口空單」，
-    而回報只給**一個**旗標。這條規則的前提是「一筆單要嘛純開、要嘛純平」，
-    在混合單下不成立。
-
-    ⚠️ **為什麼用口數當條件**：整數口數下，1 口的單不可能混合——反向部位
-       ≥1 就是純平、=0 就是純開。要混合必須 `0 < 反向部位 < 委託口數`，
-       那需要委託 ≥ 2 口。程式看不到帳戶部位（SPEC 的決定），
-       但它知道自己送了幾口。
-
-    代價要講明：**口數 ≥ 2 時就沒有這道保護了。** 那比誤報好——
-    習慣忽略某類訊息的人，真的出事那次也不會看。
-    """
-    _, notifier, _ = _run(_record(lots=2, requested_lots=2, entry_position_type="N"),
-                          broker=FakeBroker(position_type="N"))
-    assert notifier.sent == [], f"2 口的混合單不該發告警：{notifier.text}"
-
-
-def test_opposite_position_types_say_nothing():
-    """一開一平是正常的一天——出場成功本來就不推播。"""
-    _, notifier, _ = _run(_record(entry_position_type="N"),
-                          broker=FakeBroker(position_type="O"))
-    assert notifier.sent == [], f"正常的一天不該有訊息：{notifier.text}"
-
-
-def test_a_record_without_a_recorded_position_type_skips_the_check():
-    """**舊的狀態檔沒有這一格，不可以因此發假警報。**
-
-    這個欄位是 2026-08-25 才加的。在那之前寫下的記錄、以及任何看不懂
-    券商編碼的情況，這一格都是空字串——意思是「不知道」。
-    拿「不知道」去比對只會得到假警報，而假警報會讓人學會忽略這則訊息。
-    """
-    _, notifier, _ = _run(_record(), broker=FakeBroker(position_type="N"))
-    assert notifier.sent == []
-
-
-def test_an_unreadable_exit_position_type_skips_the_check():
-    """下午那筆看不懂時同樣跳過——理由與上一條相同。"""
-    _, notifier, _ = _run(_record(entry_position_type="N"),
-                          broker=FakeBroker(position_type=""))
-    assert notifier.sent == []
-
-
-def test_the_alarm_does_not_pretend_the_exit_failed():
-    """出場**確實成交了**，只是沒平到東西。狀態檔照實記。
-
-    寫成「出場失敗」的話，隔天早上那則「前一日部位沒收掉」的提醒會再發一次——
-    但那一口的方向與狀態檔記的相反，訊息會指著錯的東西叫人去平。
-    """
-    outcome, _, broker = _run(_record(entry_position_type="N"),
-                              broker=FakeBroker(position_type="N"))
+@pytest.mark.parametrize("lots", [1, 2])
+def test_the_brokers_position_flags_never_raise_an_alarm(lots):
+    """早上、下午兩筆都被券商標成新倉——PTS 的單夾在中間時，一切正常也會這樣。
+    照常出場、狀態檔記已出場，不發任何訊息。"""
+    outcome, notifier, broker = _run(
+        _record(lots=lots, requested_lots=lots, entry_position_type="N"),
+        broker=FakeBroker(position_type="N"))
     assert len(broker.orders) == 1, "只送一筆，不重試"
-    assert outcome.exited is True, "單成交了就是出場了"
+    assert outcome.exited is True
     assert read_position(path=state_path()).exited is True
+    assert notifier.sent == [], f"倉別不該引發任何訊息：{notifier.text}"
 
 
 # ─────────────────────────────────────────────────────────

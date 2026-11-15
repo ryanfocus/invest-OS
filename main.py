@@ -63,7 +63,6 @@ from state import (
 )
 from notifiers.discord import (
     build_exit_blocked_payload,
-    build_exit_did_not_offset_payload,
     build_exit_failed_payload,
     build_exit_state_broken_payload,
     build_exit_unknown_payload,
@@ -269,7 +268,7 @@ def _place_entry_order(
             # 現在寫下來，13:40 就不必再連一次報價主機去查商品清單。
             last_trading_day=contract.last_trading_day,
             order_seq=result.order_seq,
-            # 下午出場後要拿它跟出場那筆比對，見 `state.PositionRecord`
+            # 只記錄、不拿來判斷，見 `state.PositionRecord`
             entry_position_type=result.position_type,
         ),
         path=state_path,
@@ -928,40 +927,11 @@ def run_exit(
     logger.info("出場完成，平掉 %d 口", result.filled_lots)
     write_position(replace(record, exited=True, close_reason=BY_EXIT), path=state_path)
 
-    # **進場與出場的倉別必然相反——但只在一筆單純開或純平時。** 早上開了就下午平；早上平掉使用者的部位
-    # （跨越零）就下午開一口還回去。一樣代表下午那筆**碰不到早上那口**——
-    # 最常見的成因是它在盤中被手動平掉了，於是這筆反向委託開出一個新部位。
-    #
-    # ⚠️ 這是**偵測不是預防**：單已經送出去了。能做的只有讓人當天下午就知道，
-    #    而不是隔天早上才發現帳上多一口。
-    #
-    # ⚠️ 空字串是「不知道」（舊的狀態檔、看不懂的編碼），**跳過檢查**。
-    #    拿「不知道」去比對只會得到假警報，而假警報會讓人學會忽略這則訊息。
-    #
-    # 狀態檔照實記成已出場：那筆單**確實成交了**。寫成失敗的話，隔天早上
-    # 那則「前一日部位沒收掉」的提醒會指著方向相反的東西叫人去平。
-    # ⚠️ **只有 1 口的單能這樣判斷。** 2026-09-02 實機誤報：使用者持有 1 口多單、
-    #    程式賣 2 口，券商把它拆成「平掉那 1 口 ＋ 開 1 口空單」，而回報只給
-    #    **一個**旗標（兩班都是 N）。這條規則的前提是「一筆單要嘛純開、要嘛純平」，
-    #    在混合單下不成立——那天單有成交、部位也平掉了，是檢查錯了。
-    #
-    #    整數口數下，1 口的單不可能混合：反向部位 ≥1 就是純平、=0 就是純開。
-    #    要混合必須 `0 < 反向部位 < 委託口數`，那需要委託 ≥ 2 口。
-    #    程式看不到帳戶部位（SPEC 的決定），但它知道自己送了幾口。
-    #
-    #    代價：**口數 ≥ 2 時沒有這道保護。** 那比誤報好——習慣忽略某類訊息的人，
-    #    真的出事那次也不會看。這一則正是叫人去看帳戶的訊息。
-    if record.lots is not None and record.lots > 1:
-        logger.info("委託是 %d 口，可能被券商拆成平倉＋新倉，倉別無法判讀，跳過對照",
-                    record.lots)
-    elif (record.entry_position_type and result.position_type
-            and record.entry_position_type == result.position_type):
-        reason = (f"出場沒有平到倉：早上與下午的倉別都是 "
-                  f"{result.position_type}，帳上可能多一口沒人管的部位")
-        logger.error("%s", reason)
-        return _finish(
-            build_exit_did_not_offset_payload(record, result.position_type, today),
-            remaining=0, exited=True, failure=reason)
+    # 📌 **這裡曾經比對進出場兩筆的倉別**（新倉／平倉），兩筆一樣就告警「下午那筆沒有平到倉」。
+    #    2026-11-15 拿掉：倉別是券商看**整個帳戶的淨部位**判斷的，PTS 在同一個帳戶交易同一個
+    #    微台合約之後，它的單夾在 OS 兩筆之間，一切正常也會兩筆都是新倉（誤報）、出事也可能
+    #    一開一平（漏報）。本來就只在 1 口時比對（2 口以上的混合單讀不出來，2026-09-02 誤報過）。
+    #    它防的「早上那口在盤中被手動平掉」改由使用規則擋：盤中不要手動平 OS 的口數。
 
     # 例行出場不發 Discord——使用者要求每天只有一則訊息（早上那則訊號）。
     return _finish(remaining=0, exited=True)
