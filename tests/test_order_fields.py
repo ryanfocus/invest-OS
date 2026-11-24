@@ -52,7 +52,7 @@ def test_the_order_is_not_marked_as_day_trade():
 
 
 def test_the_order_is_an_intraday_order_not_a_reserved_one():
-    """0:盤中（T盤及T+1盤）1:T盤預約。08:50 送的是盤中單。"""
+    """0:盤中（T盤及T+1盤）1:T盤預約。開盤後送的是盤中單。"""
     assert _fields()["sReserved"] == 0
 
 
@@ -104,7 +104,7 @@ def test_every_order_uses_auto_so_it_can_cross_zero():
 
     SPEC 部位隔離那張策略作者確認過的表：使用者固定持有 +1、OS 做空 3 口，
 
-        08:50  OS 賣 3    +1 − 3 = −2
+        08:45  OS 賣 3    +1 − 3 = −2
         13:40  OS 買回 3  −2 + 3 = +1
 
     出場那筆買 3 口時帳上只有 **2 口空單**。「平倉」的語意是「平掉 N 口」，
@@ -118,7 +118,7 @@ def test_every_order_uses_auto_so_it_can_cross_zero():
         代碼 980：[980] 勾選新倉而有對應反向部位,退單!
 
     淨額計算下，賣掉那 1 口只是把使用者的多單收掉，生不出任何新部位——
-    「新倉」在語意上就是假的。同一張表要求 08:50 的賣單能從 +1 跨到 −2，
+    「新倉」在語意上就是假的。同一張表要求開盤時的賣單能從 +1 跨到 −2，
     而**「新倉」跨不過零**。
 
     ══ 三次實機確認 ══

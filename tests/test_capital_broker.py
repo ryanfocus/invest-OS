@@ -47,8 +47,13 @@ def test_capital_broker_imports_with_comtypes_unavailable(tmp_path):
 
 
 def test_capital_broker_exposes_the_expected_entry_point():
-    """對外只暴露 CapitalBroker；商品代碼從 broker 套件取，不從這裡再匯出一份。"""
+    """對外只暴露 CapitalBroker 與它的時鐘；商品代碼從 broker 套件取，不從這裡再匯出一份。
+
+    `SystemClock` 是 2026-11-23 加的（ADR-0006）：進場要等到 08:45:05，而睡覺時得跑
+    COM 訊息幫浦——那是群益元件的事，所以跟 CapitalBroker 住在一起，由 main 拿去用。
+    """
     import broker.capital as capital
 
-    assert capital.__all__ == ["CapitalBroker"]
+    assert capital.__all__ == ["CapitalBroker", "SystemClock"]
     assert hasattr(capital, "CapitalBroker")
+    assert hasattr(capital, "SystemClock")
