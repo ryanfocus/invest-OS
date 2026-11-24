@@ -100,9 +100,9 @@ class RecordingNotifier:
         return "\n".join(p["content"] for p in self.sent)
 
 
-# 進場那班準時執行的時刻。測試傳這個等於說「這天一切正常」，
+# 進場那班準時執行的時刻（排程 08:44 叫醒，ADR-0006）。測試傳這個等於說「這天一切正常」，
 # 而想測時間關卡的就自己寫明幾點——「哪些測試在乎時間」因此在測試碼裡看得見。
-ON_TIME = time(8, 50)
+ON_TIME = time(8, 44)
 
 
 def make_config(**overrides) -> settings_module.Config:
@@ -113,14 +113,12 @@ def make_config(**overrides) -> settings_module.Config:
     """
     base = {
         "discord_enabled": True,
-        "quote_retry_attempts": 3,
-        "quote_retry_interval_seconds": 60,
         # 每個測試預設都是「不下單」——想測下單的必須自己寫明 auto_order_enabled=True。
         # 這樣「哪些測試會下單」在測試碼裡看得見，不是靠預設值躲起來。
         "auto_order_enabled": False,
         "order_product": "MTX00AM",
         "order_lots": 1,
-        "entry_cutoff": time(9, 0),
+        "entry_cutoff": time(8, 50),
     }
     base.update(overrides)
     return settings_module.Config(**base)

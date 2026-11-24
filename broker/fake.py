@@ -58,8 +58,11 @@ class FakeBroker:
         quotes: dict | None = None,
         login_error: Exception | None = None,
         contracts: dict | None = None,
-        contracts_error: Exception | None = None,
-        order_error: Exception | None = None,
+        contracts_error: Exception | list | None = None,
+        subscribe_error: Exception | list | None = None,
+        reconnect_error: Exception | list | None = None,
+        prepare_error: Exception | None = None,
+        order_error: Exception | list | None = None,
         position_type: str = "",
         accounts: list | None = None,
         fills: list | None = None,
@@ -78,6 +81,9 @@ class FakeBroker:
             code: ContractInfo(code=code, last_trading_day=20260819) for code in PRODUCT_CODES
         }
         self._contracts_error = contracts_error
+        self._subscribe_error = subscribe_error
+        self._reconnect_error = reconnect_error
+        self._prepare_error = prepare_error
         self._order_error = order_error
         self._fills = list(fills) if fills is not None else None
         # 成交查詢（ticket 09 的後備管道）要回什麼。
@@ -90,17 +96,58 @@ class FakeBroker:
         self.open_price_calls = 0
         self.login_calls = 0
         self.contract_calls = 0
+        self.subscribe_calls = 0
+        self.prepare_calls = 0
+        self.reconnect_calls = 0
+        # 被呼叫的順序。「開盤前先準備好下單，才去讀開盤價」這種驗收條件
+        # 只看次數證明不了，要看先後。
+        self.calls: list = []
         # 收到的委託，依序記錄。「一次都沒被呼叫」要斷言 `orders == []`——
         # 這是本系統唯一會動到錢的路徑，證明它沒被走過比證明它走對了更重要。
         self.orders: list = []
 
     def login(self) -> None:
         self.login_calls += 1
+        self.calls.append("login")
         if self._login_error is not None:
             raise self._login_error
 
+    @staticmethod
+    def _next_error(spec):
+        """這一次該拋什麼（`None` 代表成功）。所有「可以注入失敗」的方法共用這條規則：
+
+        給單一例外 → 每次都拋（「一直失敗」）；給 list → 逐次消耗，用完之後就成功——
+        「前兩次失敗、第三次成功」寫成 `[錯誤, 錯誤]`。list 裡也可以放 `None` 代表那一次成功。
+        """
+        if spec is None:
+            return None
+        if not isinstance(spec, list):
+            return spec
+        return spec.pop(0) if spec else None
+
+    def subscribe_quotes(self) -> None:
+        self.subscribe_calls += 1
+        self.calls.append("subscribe_quotes")
+        error = self._next_error(self._subscribe_error)
+        if error is not None:
+            raise error
+
+    def reconnect_quotes(self) -> None:
+        self.reconnect_calls += 1
+        self.calls.append("reconnect_quotes")
+        error = self._next_error(self._reconnect_error)
+        if error is not None:
+            raise error
+
+    def prepare_order(self) -> None:
+        self.prepare_calls += 1
+        self.calls.append("prepare_order")
+        if self._prepare_error is not None:
+            raise self._prepare_error
+
     def get_open_prices(self, expected_trading_day: int | None = None) -> OpenPrices:
         self.open_price_calls += 1
+        self.calls.append("get_open_prices")
         if self._quotes is not None:
             # 走真正的檢查——這是唯一能證明 L0 有接上流程的路徑。
             return build_open_prices(self._quotes, expected_trading_day=expected_trading_day)
@@ -111,22 +158,15 @@ class FakeBroker:
 
     def get_contracts(self, wait: float = 8.0) -> dict:
         self.contract_calls += 1
-        if self._contracts_error is not None:
-            raise self._contracts_error
+        self.calls.append("get_contracts")
+        error = self._next_error(self._contracts_error)
+        if error is not None:
+            raise error
         return self._contracts
 
     def _next_order_error(self):
-        """下一次 `place_order` 該拋什麼（`None` 代表成功）。
-
-        `order_error` 給單一例外時每次都拋（「一直失敗」）；給 list 時逐次消耗，
-        用完之後不再拋——這樣「前兩次失敗、第三次成功」寫成
-        `[OrderFailed(...), OrderFailed(...), None]` 就好。
-        """
-        if self._order_error is None:
-            return None
-        if not isinstance(self._order_error, list):
-            return self._order_error
-        return self._order_error.pop(0) if self._order_error else None
+        """下一次 `place_order` 該拋什麼——規則同 `_next_error`。"""
+        return self._next_error(self._order_error)
 
     def list_accounts(self) -> list:
         """假的帳號清單。預設空的——想測「查得到」的測試要自己給。"""
@@ -139,6 +179,7 @@ class FakeBroker:
         逐次消耗、用完重複最後一項。
         """
         self.orders.append(request)
+        self.calls.append("place_order")
         error = self._next_order_error()
         if error is not None:
             raise error

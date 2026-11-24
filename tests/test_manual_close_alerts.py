@@ -173,7 +173,7 @@ def test_an_unresolved_entry_with_the_switch_off_does_not_claim_a_lookup():
 def test_an_unresolved_entry_without_an_order_number_says_how_to_find_it():
     _, notifier = _exit(FakeBroker(query_result=None), _uncertain_entry(order_seq=""))
     text = notifier.text
-    assert "沒有拿到委託序號" in text and "08:50" in text, text
+    assert "沒有拿到委託序號" in text and "08:45～08:50" in text, text
     assert "賣出" in text and "0～2 口" in text, text
 
 

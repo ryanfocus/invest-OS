@@ -2,7 +2,7 @@
 
 依 ADR-0001，本程式由排程各叫醒一次、跑完就結束，不是常駐服務。
 
-    python main.py entry    08:50 進場
+    python main.py entry    08:44 起跑，開盤前準備好，08:45:05 讀開盤價後立刻進場（ADR-0006）
     python main.py exit     13:40 出場（結算日 13:30）
 
 兩班是**獨立的執行**，中間靠狀態檔溝通。早上那班異常結束時，
@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, replace
 # `time` 這個名字已經被標準函式庫的 time 模組佔走（給 time.sleep 用），
 # 所以 datetime.time 改叫 clock——它代表的是牆上時鐘的時刻。
-from datetime import date, datetime, time as clock
+from datetime import date, datetime, time as clock, timedelta
 
 import paths
 import strategy
@@ -76,6 +76,7 @@ from notifiers.discord import (
     build_settlement_uncertain_payload,
     build_no_signal_payload,
     build_order_failed_payload,
+    build_order_not_filled_payload,
     build_signal_payload,
 )
 from settings import Config
@@ -124,28 +125,142 @@ def _notify_if_enabled(config: Config, notify, payload) -> bool:
     return bool(notify(payload))
 
 
-def _fetch_open_prices(broker, attempts: int, interval: int, sleep, trading_day: int) -> OpenPrices:
-    """取開盤價，未就緒就重試。全部用完仍未就緒 → 讓最後一個 QuoteNotReady 冒出去。
+# ─────────────────────────────────────────────────────────────
+# 進場的時間表（2026-11-23 實測後定案，理由見 ADR-0006）
+#
+#   08:44      排程叫醒 → 登入、查商品清單、訂閱報價、準備下單（實測約 9 秒）
+#   08:45:05   第一次讀開盤價 → 拿齊就算訊號、發報、下單
+#   ～08:46    沒拿齊就每 1 秒重讀
+#   08:46      還沒拿齊 → 重新連報價主機一次，之後每 10 秒重讀
+#   界線       設定檔的 `order.entry_cutoff`（08:50）：拿不到開盤價就放棄，
+#              過了它也不下單——**同一個時間管兩件事**（使用者 2026-11-23 決定合併）
+#
+# 實測：三個商品的第一筆成交 08:45:00.28 就到本機，所以正常日子第一次就讀得到。
+# 每秒重讀沒有負擔：讀的是訂閱後推進本機元件的資料，不會打到群益的伺服器。
+# ─────────────────────────────────────────────────────────────
+FIRST_READ_AT = clock(8, 45, 5)
+FAST_RETRY_SECONDS = 1
+# 從第一次讀算起 55 秒——08:45:05 開始讀的話就是到 08:46:00
+FAST_RETRY_WINDOW_SECONDS = 55
+SLOW_RETRY_SECONDS = 10
+# 報價最少試這麼久。兩種時候用得到：
+#   補跑（電腦睡著，醒來才觸發）時早就過了界線——不給它一點時間的話只會讀一次就放棄，
+#     而剛訂閱的那一刻偏偏是最可能讀到不完整資料的時候。過了界線不下單，
+#     但訊號與觀測記錄照常產生，所以還是值得讀到。
+#   `entry_cutoff: none`（不設界線）——沒有放棄的時刻可用，就只試這麼久。
+MIN_TRY_SECONDS = 60
+# 取商品清單（連報價主機）失敗時的重試間隔
+SETUP_RETRY_SECONDS = 10
 
-    重試存在的理由是 08:50 的報價偶爾晚幾十秒才齊；間隔比次數重要，
-    因為「未就緒」的時間尺度是秒到分，不是毫秒。
+
+# 正式環境的時鐘是 `broker.capital.SystemClock`（睡覺時要跑 COM 訊息幫浦，那是 broker 的事）。
+# 這裡只放測試與預設用的那一個。
+
+
+class _SteppedClock:
+    """沒有傳入時鐘時用的：從 `now` 那一刻開始，**只有睡覺會讓時間前進**。
+
+    這個系統原本的約定是「時間是參數，不是接縫」——測試傳一個 `now`
+    和一個什麼都不做的 `sleep` 就好，不必凍結牆上時鐘。進場改成要等到 08:45:05、
+    試到界線之後，流程必須能問「現在幾點」；這個時鐘讓那個約定繼續成立：
+    測試照舊傳 `now` 與 `sleep`，等待與重試在虛擬時間裡瞬間走完。
     """
-    last_error: QuoteNotReady | None = None
-    for attempt in range(1, attempts + 1):
+
+    def __init__(self, start: datetime, sleep):
+        self._now = start
+        self._sleep = sleep
+
+    def now(self) -> datetime:
+        return self._now
+
+    def sleep(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        self._sleep(seconds)
+        self._now += timedelta(seconds=seconds)
+
+
+def _give_up_time(today: date, cutoff: clock | None, started: datetime) -> datetime:
+    """報價那一側最晚試到幾點：`entry_cutoff`，但至少從 `started` 起再試 `MIN_TRY_SECONDS`。
+
+    `cutoff is None`（設定寫 `none`）時只試 `MIN_TRY_SECONDS`。
+    """
+    at_least = started + timedelta(seconds=MIN_TRY_SECONDS)
+    if cutoff is None:
+        return at_least
+    return max(datetime.combine(today, cutoff), at_least)
+
+
+def _get_contracts(broker, clk, give_up: datetime) -> dict:
+    """查商品清單，失敗就每 10 秒重試到 `give_up`。
+
+    這一步也是第一次連報價主機的地方，而報價主機連不上是暫時性的——
+    原本這裡只認 `ProductListUnavailable`，連線失敗拋的 `QuoteNotReady`
+    會一路落到「非預期錯誤」，整天以致命錯誤結束。
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return broker.get_contracts()
+        except (ProductListUnavailable, QuoteNotReady) as exc:
+            now = clk.now()
+            logger.warning("第 %d 次取商品清單失敗（%s）：%s", attempt, f"{now:%H:%M:%S}", exc)
+            if now >= give_up:
+                raise
+            clk.sleep(min(SETUP_RETRY_SECONDS, (give_up - now).total_seconds()))
+
+
+def _reconnect_quotes(broker) -> None:
+    """重新連報價主機。連不上只記下來——接下來的重試會再給它機會。"""
+    try:
+        broker.reconnect_quotes()
+        logger.info("已重新連上報價主機並重新訂閱")
+    except QuoteNotReady as exc:
+        logger.warning("重新連線報價主機失敗：%s（照樣繼續重試）", exc)
+
+
+def _fetch_open_prices(broker, clk, today: date, cutoff: clock | None,
+                       trading_day: int) -> OpenPrices:
+    """等到 08:45:05 讀開盤價，沒拿齊就照時間表重試到 `cutoff`（設定的 `entry_cutoff`）。
+
+    試到最後仍未就緒 → 讓最後一個 QuoteNotReady 冒出去，由呼叫端發「今日無訊號」。
+    其他例外（COM 壞了之類）不重試，直接往外拋。
+
+    時間表的幾個「從哪裡起算」是刻意的（2026-11-23 code review 後寫明）：
+    - 每秒重讀的 55 秒與最少試 `MIN_TRY_SECONDS`，都從**第一次讀**起算，不是看牆上時鐘。
+      正常日子第一次讀就在 08:45:05，兩者一樣；起跑或查商品清單拖慢時，
+      這樣才不會一開始讀就已經「過了快速重讀期」或「過了界線」而只讀一次。
+      代價是讀價最晚可能超過界線一點點——過了界線不下單，沒有資金風險。
+    - 重連只由這裡主動做一次。重連失敗時，之後每一次讀價 broker 都會自己再試著連
+      （見 `CapitalBroker.reconnect_quotes`）——連線真的斷了，繼續試是對的。
+    """
+    first_read = datetime.combine(today, FIRST_READ_AT)
+    wait = (first_read - clk.now()).total_seconds()
+    if wait > 0:
+        logger.info("等到 %s 讀開盤價", FIRST_READ_AT.strftime("%H:%M:%S"))
+        clk.sleep(wait)
+
+    read_start = clk.now()
+    fast_until = read_start + timedelta(seconds=FAST_RETRY_WINDOW_SECONDS)
+    give_up = _give_up_time(today, cutoff, read_start)
+    reconnected = False
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             return broker.get_open_prices(expected_trading_day=trading_day)
         except QuoteNotReady as exc:
-            last_error = exc
-            logger.warning("第 %d/%d 次取開盤價未就緒：%s", attempt, attempts, exc)
-            if attempt < attempts:
-                sleep(interval)
-    if last_error is None:
-        # attempts < 1 才會走到這裡。`settings.py` 驗過它 ≥ 1，所以正式流程
-        # 到不了——但這個函式的參數不帶那個前提，直接呼叫時傳 0 的話，
-        # 原本會變成 `raise None`（TypeError: exceptions must derive from
-        # BaseException），完全看不出真正的原因。
-        raise QuoteNotReady(f"重試次數是 {attempts}，一次都沒有嘗試取報價")
-    raise last_error
+            now = clk.now()
+            logger.warning("第 %d 次取開盤價未就緒（%s）：%s", attempt, f"{now:%H:%M:%S}", exc)
+            if now >= give_up:
+                raise
+            if now >= fast_until and not reconnected:
+                reconnected = True
+                _reconnect_quotes(broker)
+                continue
+            interval = FAST_RETRY_SECONDS if now < fast_until else SLOW_RETRY_SECONDS
+            clk.sleep(min(interval, (give_up - now).total_seconds()))
 
 
 _SIDE_BY_SIGNAL = {strategy.LONG: BUY, strategy.SHORT: SELL}
@@ -361,6 +476,7 @@ def run_entry(
     *,
     now: clock,
     sleep=time.sleep,
+    wall_clock=None,
     state_path: str,
     observations_path: str,
     logs_path: str | None = None,
@@ -374,11 +490,15 @@ def run_entry(
 
     `fetch_official` 是取官方資料的函式，預設連期交所。傳進來是為了讓測試
     餵它壞東西（斷線、缺商品、格式看不懂）而不需要真的連外。
+
+    `wall_clock` 是有 `now()` 與 `sleep()` 的時鐘。正式環境傳 `broker.capital.SystemClock()`；
+    沒傳的話用 `_SteppedClock`：從 `now` 開始、只有 `sleep` 會讓時間前進——
+    測試因此照舊只要給 `now` 與一個不做事的 `sleep`。
     """
     outcome = _run_strategy(
         config, today, broker, notify,
-        now=now,
-        sleep=sleep, state_path=state_path, observations_path=observations_path,
+        now=now, sleep=sleep, wall_clock=wall_clock,
+        state_path=state_path, observations_path=observations_path,
     )
 
     # 非交易日與重複執行都不對帳（`skipped`）。
@@ -429,10 +549,12 @@ def _run_strategy(
     *,
     now: clock,
     sleep=time.sleep,
+    wall_clock=None,
     state_path: str,
     observations_path: str,
 ) -> EntryOutcome:
-    """進場流程：登入 → 取開盤價（含重試）→ 算訊號 → 發報 → 寫觀測 → 下單。
+    """進場流程：登入 → 查商品清單 → 訂閱報價、準備下單（都在開盤前）
+    → 08:45:05 取開盤價（含重試）→ 算訊號 → 發報 → 寫觀測 → 下單。
 
     `notify` 是一個吃 payload、回傳是否成功的可呼叫物件。
 
@@ -440,6 +562,8 @@ def _run_strategy(
     忘記傳的測試會靜靜地讀寫專案裡真正的 `state/`——那既會污染開發機的記錄，
     也會讓測試結果取決於那些檔案當下的內容。現在忘記傳就是 TypeError。
     """
+
+    clk = wall_clock or _SteppedClock(datetime.combine(today, now), sleep)
 
     def _send(payload) -> bool:
         return _notify_if_enabled(config, notify, payload)
@@ -575,8 +699,9 @@ def _run_strategy(
     # 近月合約與結算日都來自商品清單，不由日期推算——
     # 最後交易日遇假日會順延，「每月第三個週三」那條算式抓不到（見 ticket 03）。
     try:
-        contracts = broker.get_contracts()
-    except ProductListUnavailable as exc:
+        contracts = _get_contracts(
+            broker, clk, _give_up_time(today, config.entry_cutoff, clk.now()))
+    except (ProductListUnavailable, QuoteNotReady) as exc:
         return _no_signal(str(exc))
     except Exception as exc:  # noqa: BLE001
         return _fatal(f"取商品清單時發生非預期錯誤（{type(exc).__name__}）：{exc}")
@@ -592,12 +717,31 @@ def _run_strategy(
         "（今天是結算日）" if settlement else "",
     )
 
+    # ── 開盤前把能做的先做完（ADR-0006）──
+    # 訂閱好的報價會一路推進本機元件；08:45:05 讀的就是那份資料。
+    # 訂不起來不在這裡放棄：讀開盤價時會再訂一次，那一段有自己的重試。
+    try:
+        broker.subscribe_quotes()
+    except QuoteNotReady as exc:
+        logger.warning("開盤前訂閱報價失敗：%s（讀開盤價時會再試）", exc)
+    except Exception as exc:  # noqa: BLE001
+        return _fatal(f"訂閱報價時發生非預期錯誤（{type(exc).__name__}）：{exc}")
+
+    # 下單準備（初始化、讀憑證、連回報、查帳號）約 3.3 秒，先做掉。
+    # 失敗**不擋訊號**：送單時 `place_order` 會從失敗的那一步再做一次，
+    # 那時還失敗才是真正的「下單失敗」，由原本那條路發告警。
+    # 狀態檔讀不懂的日子不會下單（見下方 state_error），就不必準備。
+    if config.auto_order_enabled and not state_error:
+        try:
+            broker.prepare_order()
+            logger.info("下單準備完成")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("開盤前下單準備失敗（%s）：%s。送單時會再試一次",
+                         type(exc).__name__, exc)
+
     try:
         opens = _fetch_open_prices(
-            broker,
-            attempts=config.quote_retry_attempts,
-            interval=config.quote_retry_interval_seconds,
-            sleep=sleep,
+            broker, clk, today, config.entry_cutoff,
             # 報價必須屬於今天。休市或尚未換日時群益會給上一交易日的價格，
             # 而那看起來完全正常——這是唯一 L1/L2 都攔不住的錯誤。
             trading_day=to_yyyymmdd(today),
@@ -605,7 +749,7 @@ def _run_strategy(
     except QuoteNotReady as exc:
         return _no_signal(str(exc), contracts=contracts, is_settlement_day=settlement)
     except Exception as exc:  # noqa: BLE001
-        # 非 QuoteNotReady 的例外不重試——重試 ImportError 三次沒有意義，只是拖時間。
+        # 非 QuoteNotReady 的例外不重試——重試 ImportError 沒有意義，只是拖時間。
         return _fatal(f"取開盤價時發生非預期錯誤（{type(exc).__name__}）：{exc}")
 
     logger.info("開盤價 大台=%s 小台=%s 微台=%s", opens.tx, opens.mtx, opens.tmf)
@@ -650,20 +794,28 @@ def _run_strategy(
     #    「太晚了沒下單」只是噪音——它描述的是一件不會發生的事。
     #    `entry_cutoff is None` 代表使用者刻意關掉了這道關卡（設定裡寫 `none`）。
     #    關掉的後果寫在設定檔裡；這裡照他的話做，不再自己加保險。
+    #
+    #    比的是**現在**，不是這班開始的時刻：改成開盤前起跑之後，取開盤價可能
+    #    重試好幾分鐘，補跑的那一班更可能在重試途中跨過界線。
+    #
+    #    這個界線同時也是取開盤價的放棄時刻（`_give_up_time`）——一個時間管兩件事，
+    #    設定檔裡只有一個數字要改（2026-11-23 與使用者決定合併）。
+    decided_at = clk.now().time()
     if (config.auto_order_enabled and config.entry_cutoff is not None
-            and now > config.entry_cutoff):
-        reason = (f"這班在 {now.strftime('%H:%M')} 才跑，"
+            and decided_at > config.entry_cutoff):
+        # 時刻寫到秒：界線就在重試的盡頭，「08:50 才要下單，已過 08:50」會讓人看不懂
+        reason = (f"這班在 {decided_at.strftime('%H:%M:%S')} 才要下單，"
                   f"已過 {config.entry_cutoff.strftime('%H:%M')} 的界線，未下單")
         logger.error("%s", reason)
         _send(build_entry_too_late_payload(
-            result.signal, now, config.entry_cutoff, today))
+            result.signal, decided_at, config.entry_cutoff, today))
         return EntryOutcome(
             signal=result.signal, opens=opens, notified=notified, exit_code=1,
             failure=reason, contracts=contracts, is_settlement_day=settlement,
         )
 
     try:
-        _place_entry_order(
+        order = _place_entry_order(
             config, broker, result.signal, contracts,
             today=today, state_path=state_path,
         )
@@ -684,6 +836,18 @@ def _run_strategy(
         # 與登入那一段同樣的理由：COM 壞掉時拋的不是 OrderFailed，
         # 少了這一條，例外會逃出去而使用者只看到訊號、以為單下好了。
         return failed(f"下單時發生非預期錯誤（{type(exc).__name__}）：{exc}")
+
+    if order is not None and order.filled_lots <= 0:
+        # **送出了但 0 口成交。** OS 今天沒有部位，下午那班也不會動作——
+        # 而使用者手上只有早上那則訊號，自然以為已經進場。原本這裡只記一行 log
+        # 並以 0 結束（2026-11-23 檢視時發現），現在一定要講出來。
+        reason = "委託送出了但 0 口成交，今天沒有部位"
+        logger.error("%s", reason)
+        _send(build_order_not_filled_payload(config.order_product, config.order_lots, today))
+        return EntryOutcome(
+            signal=result.signal, opens=opens, notified=notified, exit_code=1,
+            failure=reason, contracts=contracts, is_settlement_day=settlement,
+        )
 
     return EntryOutcome(
         signal=result.signal, opens=opens, notified=notified, exit_code=0,
@@ -720,6 +884,14 @@ class ExitOutcome:
     skipped: bool = False
 
 
+# 出場委託**確定沒送出去**（OrderFailed）時重試幾次、間隔幾秒——SPEC 第 25 條。
+# 原本放在設定檔的 `quote.retry_*`，與進場共用；進場改用固定時間表之後（ADR-0006）
+# 只剩這裡在用，2026-11-23 改成常數、從設定檔拿掉（舊設定檔留著那兩個鍵也不會出錯）。
+# ⚠️ 間隔設成 0 等於取消整個機制——三次會在毫秒內燒完。間隔比次數重要。
+EXIT_RETRY_ATTEMPTS = 3
+EXIT_RETRY_SECONDS = 60
+
+
 def run_exit(
     config: Config,
     today: date,
@@ -731,7 +903,7 @@ def run_exit(
 ) -> ExitOutcome:
     """出場流程：讀狀態檔 → 送出等量反向委託 → 更新狀態檔。
 
-    刻意**不查商品清單**：下單代碼與最後交易日在 08:50 就寫進狀態檔了。
+    刻意**不查商品清單**：下單代碼與最後交易日在早上進場時就寫進狀態檔了。
     13:40 再去連一次報價主機只是多一個會失敗的地方，而那時候失敗的代價是部位過夜。
     """
 
@@ -915,7 +1087,7 @@ def run_exit(
         lots=record.lots,
     )
     # 結算日在上面就回去了，走到這裡一定是一般交易日。
-    attempts = config.quote_retry_attempts
+    attempts = EXIT_RETRY_ATTEMPTS
 
     # 登入放在重試迴圈**外面**：重試的是委託，不是身分驗證。
     # 而且真正的 login() 會重新驗證憑證並等聲明書，每次重試都做一遍很浪費。
@@ -960,7 +1132,7 @@ def run_exit(
             last_error = exc
             logger.warning("第 %d/%d 次出場失敗：%s", attempt, attempts, exc)
             if attempt < attempts:
-                sleep(config.quote_retry_interval_seconds)
+                sleep(EXIT_RETRY_SECONDS)
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             logger.error("出場時發生非預期錯誤（%s）：%s", type(exc).__name__, exc)
@@ -1050,7 +1222,13 @@ def _build_runtime(require_account: bool = True):
     from broker.capital import CapitalBroker
     from notifiers.discord import send
 
-    config = settings.load()
+    raw = settings.read_raw()
+    config = settings.build(raw)
+    leftover = settings.obsolete_keys(raw)
+    if leftover:
+        # 只提醒、不擋：留著也不會怎樣，但改了它不會有任何效果，使用者該知道。
+        logger.warning("設定檔裡的 %s 已經不再使用，可以刪掉（見 docs/adr/0006）",
+                       "、".join(sorted(leftover)))
     user_id = settings.read_env("CAPITAL_USER_ID")
     password = settings.read_env("CAPITAL_PASSWORD")
     if not user_id or not password:
@@ -1083,7 +1261,7 @@ def _build_runtime(require_account: bool = True):
 def main(argv=None) -> int:
     """排程的進入點。兩班各叫一次：
 
-        python main.py entry    08:50 進場
+        python main.py entry    08:44 起跑，開盤價一到就進場
         python main.py exit     13:40 出場（結算日 13:30）
         python main.py account  查出可下單的帳號（第一次設定時用）
 
@@ -1094,7 +1272,7 @@ def main(argv=None) -> int:
 
     parser = argparse.ArgumentParser(description="OS 策略")
     parser.add_argument("stage", choices=("entry", "exit", "account"),
-                        help="entry=08:50 進場，exit=13:40 出場，"
+                        help="entry=08:44 起跑、開盤價一到就進場，exit=13:40 出場，"
                              "account=查出可下單的帳號（給第一次設定的人用）")
     args = parser.parse_args(argv)
 
@@ -1126,13 +1304,15 @@ def main(argv=None) -> int:
         return run_account(broker)
 
     # 日期與時刻**一起取**，而且只取這一次。分兩次呼叫的話，跨午夜那一瞬間
-    # 會拿到互相矛盾的兩個值。時間在這個系統裡不做接縫（見 SPEC），
-    # 它從這裡當參數傳進流程，測試因此不需要凍結時鐘。
+    # 會拿到互相矛盾的兩個值。日期與起跑時刻從這裡當參數傳進流程；
+    # 進場另外需要一個會走的時鐘（等到 08:45:05、重試到 entry_cutoff，ADR-0006）。
     started = datetime.now()
     today = started.date()
     if args.stage == "entry":
+        from broker.capital import SystemClock
         outcome = run_entry(config, today=today, broker=broker, notify=notify,
                             now=started.time(),
+                            wall_clock=SystemClock(),
                             state_path=STATE_PATH,
                             observations_path=OBSERVATIONS_PATH)
         logger.info("進場結束：訊號=%s exit_code=%s", outcome.signal, outcome.exit_code)

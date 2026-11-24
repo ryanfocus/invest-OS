@@ -79,7 +79,7 @@ def _exit(*, query_result, record=None, **kw):
 
 
 # ─────────────────────────────────────────────────────────
-# 進場側（08:50）：推播沒來 → 查一次
+# 進場側（開盤後）：推播沒來 → 查一次
 # ─────────────────────────────────────────────────────────
 
 
@@ -150,7 +150,7 @@ def test_a_zero_fill_from_the_query_means_no_position():
 
 
 def test_the_query_is_only_asked_once():
-    """文件限制每次查詢間需間隔五秒，而 08:50 沒有重試的餘裕。"""
+    """文件限制每次查詢間需間隔五秒，而進場那班沒有重試的餘裕。"""
     _, _, broker = _entry(query_result=None)
     assert len(broker.query_calls) == 1
 

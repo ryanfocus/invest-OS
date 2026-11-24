@@ -375,13 +375,41 @@ def test_a_failed_certificate_read_stops_before_any_order():
 def test_the_certificate_is_not_read_twice():
     """`_ensure_order_ready` 會被重複呼叫（進場一次、查詢一次）。
 
-    憑證讀取要走網路驗證，重複做只是拖時間——而 08:50 的每一秒都在
+    憑證讀取要走網路驗證，重複做只是拖時間——而開盤後的每一秒都在
     逼近開盤價的有效窗口。
     """
     broker = _cert_broker()
     broker._ensure_order_ready()
     broker._ensure_order_ready()
     assert broker._order.calls.count("cert:U1234") == 1
+
+
+def test_a_retried_preparation_resumes_from_the_step_that_failed():
+    """開盤前準備失敗、送單時再做一次 → **只從失敗的那一步接著做**。
+
+    2026-11-23 起下單準備移到開盤前（ADR-0006），送單時若還沒準備好會再做一次。
+    重頭做的話，第二次讀憑證群益回的是 2005「驗章已過」——照「非 0 就是失敗」
+    的規則，一個其實已經好了的步驟會讓那天變成「下單失敗」。
+    """
+    from broker import OrderFailed
+
+    class _FlakyReply:
+        def __init__(self):
+            self.calls = 0
+
+        def SKReplyLib_ConnectByID(self, uid):
+            self.calls += 1
+            return 1001 if self.calls == 1 else 0      # 第一次連不上
+
+    broker = _cert_broker()
+    broker._reply = _FlakyReply()
+    with pytest.raises(OrderFailed, match="回報連線"):
+        broker.prepare_order()
+    broker.prepare_order()
+
+    assert broker._order.calls.count("init") == 1
+    assert broker._order.calls.count("cert:U1234") == 1
+    assert broker._reply.calls == 2
 
 
 # --- 保存券商回覆的原始內容（2026-08-21 缺口三）---

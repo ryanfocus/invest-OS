@@ -76,7 +76,7 @@ def test_appending_keeps_the_earlier_days(tmp_path):
 def test_reading_skips_days_on_or_after_the_cutoff(tmp_path):
     """對帳要拿的是**前一天**的觀測，不是今天剛寫的那一筆。
 
-    今天早上 08:50 才寫的那行，期交所根本還沒公布當日資料——
+    今天早上進場時才寫的那行，期交所根本還沒公布當日資料——
     拿它去對只會每天都「查無資料」而靜默跳過，對帳等於從來沒跑過。
     """
     p = path(tmp_path)

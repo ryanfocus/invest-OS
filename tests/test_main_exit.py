@@ -7,7 +7,7 @@
 
 所以斷言集中在**平了幾口、什麼方向**，以及**什麼情況下一口都不准平**。
 
-出場刻意**不查商品清單**：下單代碼與最後交易日在 08:50 就知道了，
+出場刻意**不查商品清單**：下單代碼與最後交易日在早上進場時就知道了，
 都寫在狀態檔裡。13:40 再去連一次報價主機只是多一個會失敗的地方，
 而那時候失敗的代價是部位過夜。
 """
@@ -91,7 +91,7 @@ def test_exit_lots_come_from_the_actual_fill_not_the_request():
 
 
 def test_exit_uses_the_order_code_from_the_state_file():
-    """出場不查商品清單——代碼在 08:50 就記下來了。"""
+    """出場不查商品清單——代碼在早上進場時就記下來了。"""
     _, _, broker = _run(_record())
     assert broker.orders[0].order_code == "MTX08"
     assert broker.orders[0].contract_month == "202608"
@@ -556,8 +556,8 @@ def test_the_unknown_exit_message_never_prints_a_placeholder_for_missing_lots():
 # 一開一平（漏報）。
 #
 #     開盤前  使用者固定持有          +1
-#     08:50   PTS 賣 1                 0
-#     08:50   OS  賣 1                −1    OS 這筆：N
+#     08:45   PTS 賣 1                 0
+#     08:45   OS  賣 1                −1    OS 這筆：N
 #     13:25   PTS 買回 1               0
 #     13:40   OS  買回 1              +1    OS 這筆：N   ← 帳戶回到 +1，一切正常
 #

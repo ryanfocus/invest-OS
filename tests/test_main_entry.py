@@ -21,6 +21,8 @@ def _run(tx, mtx, tmf, cfg=None, notifier=None):
         today=D,
         broker=FakeBroker(tx=tx, mtx=mtx, tmf=tmf),
         notify=notifier,
+        # 08:44 起跑會等到 08:45:05——不傳的話就是真的睡 65 秒
+        sleep=lambda _s: None,
         state_path=state_path(),
         observations_path=observations_path(),
         fetch_official=lambda day: None,

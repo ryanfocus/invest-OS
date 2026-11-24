@@ -40,14 +40,13 @@ _YAML_KEYS = {
 @dataclass(frozen=True)
 class Config:
     discord_enabled: bool
-    quote_retry_attempts: int
-    quote_retry_interval_seconds: int
     # 自動下單。**關閉時程式完全不碰下單 API**，只發訊號。
     auto_order_enabled: bool
     order_product: str          # 報價代碼，必須是 broker.PRODUCT_CODES 之一
     order_lots: int
     # 送出委託後等成交回報的秒數。逾時 → 記為「不確定」並要求人工確認。
-    # 進場的時間界線。過了它就**不下單**（訊號與觀測照常）。
+    # 進場的時間界線。**一個時間管兩件事**（2026-11-23 起，ADR-0006）：
+    # 拿不到開盤價就重試到它為止；過了它就**不下單**（訊號與觀測照常）。
     # **`None` 代表不設限**——什麼時候跑都下單。
     # 排程設了「錯過就補跑」，而程式本身沒有時鐘——停電或強制更新重開之後，
     # 進場那班會在電腦回來的那一刻觸發並用市價送單。最壞的情況是它拖到
@@ -75,15 +74,6 @@ class Config:
                     f"目前是 {value!r}（型別 {type(value).__name__}）"
                 )
 
-        if self.quote_retry_attempts < 1:
-            raise ValueError(
-                f"quote.retry_attempts 必須 ≥ 1，目前是 {self.quote_retry_attempts}"
-            )
-        if self.quote_retry_interval_seconds < 0:
-            raise ValueError(
-                f"quote.retry_interval_seconds 不可為負，目前是 "
-                f"{self.quote_retry_interval_seconds}"
-            )
         if self.order_lots < 1:
             raise ValueError(f"order.lots 必須 ≥ 1，目前是 {self.order_lots}")
         if self.order_lots > MARKET_ORDER_LOT_CAP:
@@ -193,13 +183,26 @@ def build(raw) -> Config:
     """從原始 mapping 組出 Config。缺 key 會拋 KeyError，不靜默補預設值。"""
     return Config(
         discord_enabled=raw["discord"]["enabled"],
-        quote_retry_attempts=raw["quote"]["retry_attempts"],
-        quote_retry_interval_seconds=raw["quote"]["retry_interval_seconds"],
+        # 2026-11-23 拿掉 `quote.retry_*`（見 main.EXIT_RETRY_*）。舊設定檔留著那兩個鍵
+        # 不會出錯：這裡只讀要用的鍵，多出來的不理。
         auto_order_enabled=raw["order"]["auto_enabled"],
         order_product=raw["order"]["product"],
         order_lots=raw["order"]["lots"],
         entry_cutoff=_parse_clock(raw["order"]["entry_cutoff"], "order.entry_cutoff"),
     )
+
+
+# 已經拿掉、但舊設定檔裡可能還留著的 key。載入**不會**因此失敗（`build()` 只讀要用的），
+# 但使用者改了會以為有效——所以起跑時在 log 提醒一句（`main._build_runtime`）。
+OBSOLETE_KEYS = frozenset({
+    "quote.retry_attempts",            # 2026-11-23 拿掉：進場改用時間表、出場改用常數（ADR-0006）
+    "quote.retry_interval_seconds",
+})
+
+
+def obsolete_keys(raw: dict) -> set:
+    """設定檔裡還留著、但程式已經不讀的 key。"""
+    return flatten_keys(raw) & OBSOLETE_KEYS
 
 
 def consumed_keys(raw: dict) -> set:

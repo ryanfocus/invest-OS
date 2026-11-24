@@ -129,7 +129,7 @@ def test_the_reminder_survives_an_uncertain_record_without_printing_none():
 
 
 LATE = time(11, 3)          # 電腦中午才回來
-CUTOFF = time(9, 0)         # config 的預設界線
+CUTOFF = time(8, 50)        # config 的預設界線
 
 
 def test_a_late_run_places_no_order():
@@ -179,7 +179,7 @@ def test_a_late_run_says_there_is_no_position_to_worry_about():
     """
     _, notifier, _ = _run(LONG_OPENS, now=LATE)
     assert "11:03" in notifier.text, "沒講實際幾點跑的，使用者不知道排程慢了多久"
-    assert "09:00" in notifier.text, "沒講界線在哪，使用者不知道要調什麼"
+    assert "08:50" in notifier.text, "沒講界線在哪，使用者不知道要調什麼"
     assert "沒有部位" in notifier.text
     assert "🚨 下單失敗" not in notifier.text
 
@@ -191,7 +191,7 @@ def test_a_late_run_ends_with_a_non_zero_code():
 
 
 def test_the_cutoff_itself_is_still_in_time():
-    """界線那一刻仍然算準時——「到 09:00 為止」而不是「不到 09:00」。
+    """界線那一刻仍然算準時——「到 08:50 為止」而不是「不到 08:50」。
 
     邊界寫反的代價不對稱：早一分鐘擋掉是白白少做一天，
     晚一分鐘放行只是多一分鐘的偏差。但更重要的是**規則要講得清楚**。
@@ -232,7 +232,7 @@ def test_a_late_run_with_ordering_switched_off_says_nothing_extra():
 
 def test_a_run_before_the_cutoff_orders_as_usual():
     """對照組：界線之前一切照舊。"""
-    _, _, broker = _run(LONG_OPENS, now=time(8, 59))
+    _, _, broker = _run(LONG_OPENS, now=time(8, 49))
     assert len(broker.orders) == 1
 
 

@@ -39,6 +39,10 @@ _ONLY_THESE_LOTS = ("只平這個口數，不要照 APP 上的部位全平："
 _DEADLINE = "請在 13:45 日盤收盤前送出；來不及就在夜盤（15:00 開盤）送出。"
 # 出場那班的告警送到之後，那些口數就記成交給使用者（`handed_over`），所以這句是真的。
 _HANDED_OVER = "這則只發一次，程式不會再處理這幾口（重跑出場也不會送單）。"
+# 叫人在券商 APP 的委託查詢裡找早上那一筆時給的時段（沒有委託序號才用得到）。
+# 2026-11-23 起進場單在開盤價一到就送（約 08:45:06），最晚到 `entry_cutoff`（08:50），
+# 見 docs/adr/0006-entry-at-open.md。改進場時間表時這裡要跟著改。
+_ENTRY_ORDER_TIME = "08:45～08:50 之間"
 
 
 def _contract(record) -> str:
@@ -95,8 +99,27 @@ def build_order_failed_payload(reason: str, trading_date: date) -> dict:
         f"{trading_date.strftime('%Y/%m/%d')} OS",
         "🚨 下單失敗",
         f"原因：{reason}",
-        "訊號已發出，但**委託沒有送出去，帳上不會有部位**——今天不用做任何事。",
+        "訊號已發出，但**委託沒有送出去，OS 今天不會有部位**——不用做任何事。",
         "下午那班也不會有東西要平。",
+    ]
+    return {"content": "\n".join(lines)}
+
+
+def build_order_not_filled_payload(product: str, lots: int, trading_date: date) -> dict:
+    """委託送出了，但確認 **0 口成交**。純函式，無 I/O。
+
+    與「下單失敗」不同的是委託**有**送出去；相同的是 OS **確定沒有**部位。
+    訊息因此不叫人去看帳戶（理由見 `build_order_failed_payload`）。
+
+    存在的理由（2026-11-23 補）：這種情況原本只記一行 log、程式照常以 0 結束。
+    使用者早上收到的是訊號那一則，自然以為已經進場——而下午那班也不會有任何動作，
+    唯一能發現的方法是自己去翻券商 APP。
+    """
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "⚠️ 委託沒有成交",
+        f"{product} {lots} 口的市價 IOC 委託送出了，但確認 0 口成交。",
+        "OS 今天**沒有**部位——不用做任何事，下午那班也不會有東西要平。",
     ]
     return {"content": "\n".join(lines)}
 
@@ -132,7 +155,7 @@ def build_stale_position_payload(record, trading_date: date) -> dict:
         what = (f"{day_text} 的 {side} {record.requested_lots} 口 {_contract(record)}"
                 f"（{seq_text}，成交幾口當時就沒問到）")
         action = (_look_up(record.order_seq,
-                           f"{day_text} 08:50 左右{side} {record.requested_lots} 口 "
+                           f"{day_text} {_ENTRY_ORDER_TIME}{side} {record.requested_lots} 口 "
                            f"{record.order_code} 的那一筆")
                   + f"成交了幾口，請自行{close}那個口數（0～{record.requested_lots} 口）。")
     elif record.uncertain_exit:
@@ -169,25 +192,30 @@ def build_stale_position_payload(record, trading_date: date) -> dict:
     return {"content": "\n".join(lines)}
 
 
-def build_entry_too_late_payload(signal: str, ran_at, cutoff, trading_date: date) -> dict:
+def build_entry_too_late_payload(signal: str, decided_at, cutoff, trading_date: date) -> dict:
     """**這班太晚了，所以沒有下單。** 純函式，無 I/O。
 
     與「下單失敗」刻意分成兩則：那一則的意思是「單可能出了問題，去看帳戶」，
     這一則是「**確定什麼都沒送**，帳上乾淨」。講混了的代價是使用者白跑一趟
     券商 APP——而白跑幾次之後，真的出事那一則他就不會認真看了。
 
-    訊息裡放實際執行時刻與界線兩個數字，因為使用者要做的判斷是
-    「排程慢了多久、要不要調界線」，那兩個數字缺一個都判斷不了。
+    訊息裡放實際時刻與界線兩個數字，因為使用者要做的判斷是
+    「慢了多久、要不要調界線」，那兩個數字缺一個都判斷不了。
+
+    時刻寫到秒（2026-11-23 起）：界線同時是取開盤價的放棄時刻，開盤價拖到
+    界線那一刻才拿到時，只寫到分鐘會變成「08:50 才要下單，已過 08:50」。
+    也因為這樣，原因不再只有「排程補跑」一種，兩種都要講。
     """
     lines = [
         f"{trading_date.strftime('%Y/%m/%d')} OS",
         "⏰ **這班太晚了，沒有下單**",
         "",
         f"訊號：{_SIGNAL_TEXT.get(signal, signal)}",
-        f"實際執行 {ran_at.strftime('%H:%M')}，已過 {cutoff.strftime('%H:%M')} 的界線。",
+        f"要下單時已是 {decided_at.strftime('%H:%M:%S')}，已過 {cutoff.strftime('%H:%M')} 的界線。",
         "",
         "**帳上沒有部位**——什麼都沒有送出去，下午也沒有東西要平。",
-        "排程大概是因為關機或重開機而補跑的，確認一下電腦有沒有意外重啟。",
+        "可能是排程補跑（確認一下電腦有沒有意外關機或重開），"
+        "或是開盤價一直拖到界線才拿到。",
     ]
     return {"content": "\n".join(lines)}
 
@@ -339,7 +367,7 @@ def build_exit_blocked_payload(record, trading_date: date, *, looked_up: bool = 
         f"**請自行{close} {_contract(record)}，口數＝這筆委託實際成交的口數"
         f"（0～{record.requested_lots} 口）。**",
         _look_up(record.order_seq,
-                 f"今天 08:50 左右{side} {record.requested_lots} 口 {record.order_code} 的那一筆")
+                 f"今天 {_ENTRY_ORDER_TIME}{side} {record.requested_lots} 口 {record.order_code} 的那一筆")
         + f"成交了幾口，就{close}幾口；一口都沒成交就什麼都不用做。",
         _ONLY_THESE_LOTS,
         _DEADLINE,
