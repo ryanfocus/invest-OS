@@ -73,7 +73,7 @@ _PRICE_SCALE = 100.0
 _QUERY_INTERVAL_SECONDS = 5.5
 
 
-__all__ = ["CapitalBroker"]
+__all__ = ["CapitalBroker", "SystemClock"]
 
 
 def _resolve_dll_path() -> str:
@@ -191,6 +191,10 @@ class _QuoteEvents:
     def __init__(self) -> None:
         self.stocks_ready = False
         self.quote_updates = 0
+        # 收到過報價的商品（索引）。訂閱後要等**三個都到**才讀——只等「任一個」的話，
+        # 另外兩個的資料可能還在路上，讀到的開盤價是 0（2026-11-23 證實：
+        # 08:50 讀到 0，同一時刻探測程式從 08:45:00.33 起就讀得到）。
+        self.updated_indexes: set = set()
         self.commodity_chunks: list = []
 
     def OnConnection(self, nKind, nCode):
@@ -199,10 +203,49 @@ class _QuoteEvents:
 
     def OnNotifyQuoteLONG(self, sMarketNo, nIndex):
         self.quote_updates += 1
+        self.updated_indexes.add(nIndex)
 
     def OnNotifyCommodityListWithTypeNo(self, sMarketNo, bstrCommodityData):
         # 清單很長（實測 46 萬字元），會分多次送來，全部接完再一起解析
         self.commodity_chunks.append(bstrCommodityData)
+
+    def reset_connection(self) -> None:
+        """離開報價主機後，連線與報價的狀態都要從頭來過（`reconnect_quotes` 用）。"""
+        self.stocks_ready = False
+        self.quote_updates = 0
+        self.updated_indexes.clear()
+
+
+class SystemClock:
+    """正式環境給進場流程用的時鐘：牆上時間，與**會處理 COM 事件**的睡眠。
+
+    放在這裡而不是 `main`：broker 是群益元件唯一的出入口（SPEC 模組劃分），
+    而「睡覺時要跑訊息幫浦」是 COM 的事。`main` 只知道它有 `now()` 與 `sleep()`。
+
+    ⚠️ 睡覺時不可以只是 `time.sleep`。群益的報價、回報都是 COM 事件，
+       要有人跑訊息幫浦才會被處理——開盤前那一分多鐘若完全不處理，
+       事件會在佇列裡堆積，讀開盤價的那一刻才一口氣湧進來。
+    """
+
+    def now(self):
+        from datetime import datetime
+        return datetime.now()
+
+    def sleep(self, seconds: float) -> None:
+        if seconds <= 0:
+            return
+        try:
+            import pythoncom
+        except ImportError:          # 沒有 pywin32 的機器（只會是開發機）
+            time.sleep(seconds)
+            return
+        deadline = time.monotonic() + seconds
+        while True:
+            pythoncom.PumpWaitingMessages()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(remaining, 0.05))
 
 
 class CapitalBroker:
@@ -236,6 +279,12 @@ class CapitalBroker:
         self._monitoring = False
         self._subscribed = False
         self._order_ready = False
+        # 下單準備的每一步各自記住做完沒有。開盤前做一次、送單時再補做時，
+        # 只從失敗的那一步接著做——已經讀過的憑證再讀一次，群益回的是
+        # 2005「驗章已過」，照「非 0 就是失敗」的規則會被當成失敗。
+        self._order_initialized = False
+        self._cert_read = False
+        self._reply_requested = False
         # 券商回覆的原始存檔要寫到哪。可覆寫，讓測試用 tmp_path。
         # ⚠️ 內容未遮罩（含期貨帳號）——`logs/` 在 .gitignore 內，
         #    且由 housekeeping.purge_old_logs 於 30 天後清除。
@@ -311,7 +360,8 @@ class CapitalBroker:
 
         ⚠️ 報價主機的連線**刻意不放在這裡**。那是會暫時性失敗的東西
         （主機忙、網路抖動），歸類成 LoginFailed 會讓它跳過重試階梯直接以錯誤結束——
-        08:50 的一次小抖動就會賠掉整天的訊號。它屬於 `get_open_prices` 的可重試範圍。
+        一次小抖動就會賠掉整天的訊號。它屬於報價那一側的可重試範圍
+        （`QuoteNotReady`，由 `main` 的取商品清單與取開盤價兩段重試）。
         """
         self._ensure_com()
 
@@ -386,7 +436,7 @@ class CapitalBroker:
         `GetFulfillReport` 沒有。所以先用序號換出委託書號，再拿它去比對成交。
 
         ⚠️ **中間一定要隔五秒**，官方文件明載「限制每次查詢間需間隔五秒」。
-        這條後備路徑因此最少要 5 秒——08:50 那班還很寬裕，但別搬到更緊的時窗。
+        這條後備路徑因此最少要 5 秒——進場那班（開盤價一到就下單）還很寬裕，但別搬到更緊的時窗。
 
         **這個函式不拋例外。** 它是失敗路徑上的補救措施，自己再炸一次的話，
         原本只是「不確定」的一天會變成整班掛掉。
@@ -469,9 +519,11 @@ class CapitalBroker:
         if self._order_ready:
             return
 
-        code = self._order.SKOrderLib_Initialize()
-        if code != 0:
-            raise OrderFailed(f"下單元件初始化失敗，{self._message(code)}")
+        if not self._order_initialized:
+            code = self._order.SKOrderLib_Initialize()
+            if code != 0:
+                raise OrderFailed(f"下單元件初始化失敗，{self._message(code)}")
+            self._order_initialized = True
 
         # ⚠️ **讀憑證。少了這一步，送出委託會被回 1038 SK_ERROR_CERT_NOT_VERIFIED。**
         #
@@ -484,28 +536,32 @@ class CapitalBroker:
         #
         # 在這裡失敗比在送單時失敗好得多：1038 的訊息是「Cert Not Verified」，
         # 要人自己去猜是哪一步漏了；這裡可以直接說「憑證讀取失敗」。
-        code = self._order.ReadCertByID(self._user_id)
-        if code != 0:
-            raise OrderFailed(f"憑證讀取失敗，{self._message(code)}")
+        if not self._cert_read:
+            code = self._order.ReadCertByID(self._user_id)
+            if code != 0:
+                raise OrderFailed(f"憑證讀取失敗，{self._message(code)}")
+            self._cert_read = True
 
         # 回報連線。沒有它就收不到 OnNewData，也就不知道成交幾口。
-        code = self._reply.SKReplyLib_ConnectByID(self._user_id)
-        if code != 0:
-            raise OrderFailed(f"回報連線失敗，{self._message(code)}")
+        if not self._reply_requested:
+            code = self._reply.SKReplyLib_ConnectByID(self._user_id)
+            if code != 0:
+                raise OrderFailed(f"回報連線失敗，{self._message(code)}")
+            self._reply_requested = True
 
-        # ⚠️ **回 0 只代表「請求已受理」。** 連線結果由 OnConnect 非同步送回，
-        #    所以要跑一下訊息幫浦讓事件有機會進來。
-        #
-        #    連不上**不擋下單**：ticket 09 的查詢是獨立的後備管道，
-        #    推播壞掉時它還救得回來。擋下來反而是把「今天可能沒訊號」
-        #    這個更大的代價換一個更小的。但一定要記進 log——
-        #    等不到回報時，這一行是唯一告訴人「該往哪裡查」的東西。
-        self._pump_for(1.0)
-        if self._reply_events.connected is False:
-            logger.error("%s。推播收不到時將改用成交查詢（ticket 09）",
-                         self._reply_events.connect_error)
-        elif self._reply_events.connected is None:
-            logger.warning("回報連線狀態未知（OnConnect 尚未回來）")
+            # ⚠️ **回 0 只代表「請求已受理」。** 連線結果由 OnConnect 非同步送回，
+            #    所以要跑一下訊息幫浦讓事件有機會進來。
+            #
+            #    連不上**不擋下單**：ticket 09 的查詢是獨立的後備管道，
+            #    推播壞掉時它還救得回來。擋下來反而是把「今天可能沒訊號」
+            #    這個更大的代價換一個更小的。但一定要記進 log——
+            #    等不到回報時，這一行是唯一告訴人「該往哪裡查」的東西。
+            self._pump_for(1.0)
+            if self._reply_events.connected is False:
+                logger.error("%s。推播收不到時將改用成交查詢（ticket 09）",
+                             self._reply_events.connect_error)
+            elif self._reply_events.connected is None:
+                logger.warning("回報連線狀態未知（OnConnect 尚未回來）")
 
         # 群益要求下單前先查過帳號，即使我們用的是 .env 指定的那一個
         code = self._order.GetUserAccount()
@@ -514,6 +570,14 @@ class CapitalBroker:
         self._pump_for(2.0)
 
         self._order_ready = True
+
+    def prepare_order(self) -> None:
+        """開盤前先把下單要的東西準備好（約 3.3 秒，其中 3 秒是在等事件）。
+
+        失敗一律 `OrderFailed`。呼叫端可以不理它：`place_order` 會從失敗的那一步
+        再做一次，而那時失敗才是真正的「下單失敗」。
+        """
+        self._ensure_order_ready()
 
     def place_order(self, request: OrderRequest) -> OrderResult:
         """送出市價 IOC 委託，等成交回報後回傳**實際成交口數**。
@@ -648,6 +712,58 @@ class CapitalBroker:
         return OrderResult(filled_lots=summary.filled_lots, order_seq=seq,
                            position_type=summary.position_type)
 
+    def subscribe_quotes(self) -> None:
+        """連上報價主機並訂閱三個商品，等三個商品都至少收到一次報價才回來。
+
+        進場流程在**開盤前**呼叫它：訂閱好的報價會由群益一路推進本機元件，
+        之後 `get_open_prices` 讀的就是元件裡的資料，不會再問伺服器。
+        （2026-11-23 實測：每 0.2 秒讀一次、連讀 6 分鐘，沒有任何一次失敗；
+        08:45:05 連讀三個商品總共 1 毫秒，不可能是伺服器來回。）
+
+        等不到三個都到齊**不算失敗**：開盤前有的商品可能就是還沒有更新，
+        讀到 0 時取開盤價那一段會重試。失敗（連不上、訂閱被拒）一律 QuoteNotReady。
+        """
+        if self._center is None:
+            raise QuoteNotReady("尚未登入")
+        self._ensure_quote_connection()
+        if self._subscribed:
+            return
+        _, code = self._quote.SKQuoteLib_RequestStocks(0, ",".join(PRODUCT_CODES))
+        if code != 0:
+            raise QuoteNotReady(f"訂閱報價失敗，{self._message(code)}")
+        # 實測每個商品在訂閱後約 0.07 秒內就收到第一則報價。15 秒是很寬的上限。
+        got_all = self._pump_until(
+            lambda: len(self._quote_events.updated_indexes) >= len(PRODUCT_CODES), 15.0)
+        self._subscribed = True
+        if got_all:
+            logger.info("已訂閱三個商品的報價")
+        else:
+            logger.warning("已訂閱報價，但 15 秒內只收到 %d／%d 個商品的報價",
+                           len(self._quote_events.updated_indexes), len(PRODUCT_CODES))
+
+    def reconnect_quotes(self) -> None:
+        """離開報價主機、重新連上、重新訂閱。
+
+        用在開盤後一分鐘還拿不齊開盤價的時候——那時最可能的原因是報價連線
+        斷了卻沒有人發現，而元件裡的資料停在斷線那一刻。失敗一律 QuoteNotReady。
+
+        重連失敗時連線狀態維持「未連上」，之後每一次 `get_open_prices` 都會再試著連——
+        連線真的斷了的時候，繼續試是對的。代價是每次最多卡住連線逾時加訂閱等待
+        （約 45 秒），所以最後一次可能超過界線幾十秒才放棄；過了界線不下單，沒有資金風險。
+        """
+        if self._center is None:
+            raise QuoteNotReady("尚未登入")
+        try:
+            self._quote.SKQuoteLib_LeaveMonitor()
+        except Exception as exc:  # noqa: BLE001
+            # 連線本來就斷了的時候，離開也可能失敗。那不影響接下來重新連。
+            logger.warning("離開報價主機時出錯（%s），照樣重新連線", exc)
+        self._pump_for(1.0)
+        self._monitoring = False
+        self._subscribed = False
+        self._quote_events.reset_connection()
+        self.subscribe_quotes()
+
     def get_open_prices(self, expected_trading_day: int | None = None) -> OpenPrices:
         """取三個商品的當日 AM 盤開盤價。
 
@@ -657,18 +773,12 @@ class CapitalBroker:
         if self._center is None:
             raise QuoteNotReady("尚未登入")
 
-        self._ensure_quote_connection()
-
         if not self._subscribed:
-            page_no = 0
-            page_no, code = self._quote.SKQuoteLib_RequestStocks(page_no, ",".join(PRODUCT_CODES))
-            if code != 0:
-                raise QuoteNotReady(f"訂閱報價失敗，{self._message(code)}")
-            # 訂閱後等第一批報價進來；等不到就當作未就緒，交給上層重試
-            self._pump_until(lambda: self._quote_events.quote_updates > 0, 15.0)
-            self._subscribed = True
+            self.subscribe_quotes()
         else:
-            self._pump_for(1.0)
+            # 處理排隊中的報價事件再讀。不必久等：重試之間的等待本身就在跑訊息幫浦
+            # （`SystemClock.sleep`），這裡只是讀之前把最後一點清掉。
+            self._pump_for(0.2)
 
         quotes = {}
         for code_str in PRODUCT_CODES:

@@ -10,7 +10,7 @@
 2. **絕不礙事**——對帳自己出任何問題都不可以影響當日策略
 
 第 2 點比第 1 點重要。對帳是純加分功能，漏檢查一天沒事；
-但它若讓 08:50 那班掛掉，代價是整天沒有訊號。
+但它若讓進場那班掛掉，代價是整天沒有訊號。
 所以這裡有一整組「餵它壞東西」的測試。
 """
 
@@ -98,7 +98,7 @@ def test_no_observations_at_all_is_silent(tmp_path):
 
 
 def test_only_todays_observation_is_silent(tmp_path):
-    """08:50 才寫的那筆，期交所還沒公布當日資料。"""
+    """早上進場時才寫的那筆，期交所還沒公布當日資料。"""
     outcome, notifier = _run(tmp_path, observations=(_at(20260818),), today=20260818)
     assert outcome.checked_day is None
     assert notifier.sent == []
@@ -205,7 +205,7 @@ def test_discord_disabled_still_completes_the_comparison(tmp_path):
 
 # --- 絕不礙事：餵它壞東西 ---
 #
-# 對帳掛掉的代價是「少檢查一天」，而 08:50 那班掛掉的代價是「整天沒有訊號」。
+# 對帳掛掉的代價是「少檢查一天」，而進場那班掛掉的代價是「整天沒有訊號」。
 # 所以下面每一條的期望值都是「不拋例外」。
 
 

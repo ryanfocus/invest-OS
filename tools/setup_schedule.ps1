@@ -41,10 +41,13 @@ if ($Packaged) { $Root = $PSScriptRoot } else { $Root = Split-Path -Parent $PSSc
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
 $LogDir = Join-Path $Root 'logs'
 
-# 兩班的時間來自 SPEC：進場 08:50（開盤 08:45 之後五分鐘，讓報價就緒）、
+# 進場 08:44：開盤前把登入、商品清單、訂閱、下單準備做完（實測約 9 秒），
+#   程式自己等到 08:45:05 讀開盤價、試到 settings.yaml 的 entry_cutoff（08:50）
+#   （ADR-0006，2026-11-23 起；原本是 08:50 起跑）。
+#   ⚠️ 這個時間與 main.py 的時間表是一組的，不要只改一邊。
 # 出場 13:40（收盤 13:45 之前五分鐘的緩衝）。
 $Jobs = @(
-    @{ Name = 'invest-os 進場'; Stage = 'entry'; Time = '08:50' },
+    @{ Name = 'invest-os 進場'; Stage = 'entry'; Time = '08:44' },
     @{ Name = 'invest-os 出場'; Stage = 'exit';  Time = '13:40' }
 )
 
@@ -113,9 +116,10 @@ foreach ($job in $Jobs) {
     $trigger = New-ScheduledTaskTrigger -Daily -At $job.Time
     # StartWhenAvailable：電腦當下沒開機的話，開機後補跑。
     #   ⚠️ 補跑對「訊號」有意義（至少留下觀測記錄），對「下單」意義不大——
-    #      但程式自己會擋：開盤價的新鮮度檢查會發現那不是當日報價。
-    # ExecutionTimeLimit：20 分鐘。取開盤價最多重試三次、每次隔一分鐘，
-    #   加上對帳打三次期交所，正常不會超過五分鐘。
+    #      但程式自己會擋：過了 entry_cutoff 就不下單（訊號與觀測照常）。
+    #      （開盤價的新鮮度檢查只擋得住「隔天才補跑」，同一天補跑的報價是新鮮的。）
+    # ExecutionTimeLimit：20 分鐘。進場最晚試到 entry_cutoff（08:50，起跑後 6 分鐘），
+    #   加上對帳打三次期交所，正常不會超過十分鐘。
     # AllowStartIfOnBatteries / DontStopIfGoingOnBatteries：
     #   工作排程器的**預設是不跑**（DisallowStartIfOnBatteries=True）。
     #   筆電沒插電的話兩班都不會啟動——而 13:40 那班是刻意靜默的

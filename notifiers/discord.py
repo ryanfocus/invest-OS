@@ -78,6 +78,25 @@ def build_order_failed_payload(reason: str, trading_date: date) -> dict:
     return {"content": "\n".join(lines)}
 
 
+def build_order_not_filled_payload(product: str, lots: int, trading_date: date) -> dict:
+    """委託送出了，但確認 **0 口成交**。純函式，無 I/O。
+
+    與「下單失敗」不同的是委託**有**送出去；相同的是帳上**確定沒有**部位。
+    訊息因此不叫人去看帳戶（理由見 `build_order_failed_payload`）。
+
+    存在的理由（2026-11-23 補）：這種情況原本只記一行 log、程式照常以 0 結束。
+    使用者早上收到的是訊號那一則，自然以為已經進場——而下午那班也不會有任何動作，
+    唯一能發現的方法是自己去翻券商 APP。
+    """
+    lines = [
+        f"{trading_date.strftime('%Y/%m/%d')} OS",
+        "⚠️ 委託沒有成交",
+        f"{product} {lots} 口的市價 IOC 委託送出了，但確認 0 口成交。",
+        "帳上**沒有**部位——今天不用做任何事，下午那班也不會有東西要平。",
+    ]
+    return {"content": "\n".join(lines)}
+
+
 _POSITION_TEXT = {"N": "新倉", "O": "平倉"}
 
 
@@ -149,25 +168,30 @@ def build_stale_position_payload(record, trading_date: date) -> dict:
     return {"content": "\n".join(lines)}
 
 
-def build_entry_too_late_payload(signal: str, ran_at, cutoff, trading_date: date) -> dict:
+def build_entry_too_late_payload(signal: str, decided_at, cutoff, trading_date: date) -> dict:
     """**這班太晚了，所以沒有下單。** 純函式，無 I/O。
 
     與「下單失敗」刻意分成兩則：那一則的意思是「單可能出了問題，去看帳戶」，
     這一則是「**確定什麼都沒送**，帳上乾淨」。講混了的代價是使用者白跑一趟
     券商 APP——而白跑幾次之後，真的出事那一則他就不會認真看了。
 
-    訊息裡放實際執行時刻與界線兩個數字，因為使用者要做的判斷是
-    「排程慢了多久、要不要調界線」，那兩個數字缺一個都判斷不了。
+    訊息裡放實際時刻與界線兩個數字，因為使用者要做的判斷是
+    「慢了多久、要不要調界線」，那兩個數字缺一個都判斷不了。
+
+    時刻寫到秒（2026-11-23 起）：界線同時是取開盤價的放棄時刻，開盤價拖到
+    界線那一刻才拿到時，只寫到分鐘會變成「08:50 才要下單，已過 08:50」。
+    也因為這樣，原因不再只有「排程補跑」一種，兩種都要講。
     """
     lines = [
         f"{trading_date.strftime('%Y/%m/%d')} OS",
         "⏰ **這班太晚了，沒有下單**",
         "",
         f"訊號：{_SIGNAL_TEXT.get(signal, signal)}",
-        f"實際執行 {ran_at.strftime('%H:%M')}，已過 {cutoff.strftime('%H:%M')} 的界線。",
+        f"要下單時已是 {decided_at.strftime('%H:%M:%S')}，已過 {cutoff.strftime('%H:%M')} 的界線。",
         "",
         "**帳上沒有部位**——什麼都沒有送出去，下午也沒有東西要平。",
-        "排程大概是因為關機或重開機而補跑的，確認一下電腦有沒有意外重啟。",
+        "可能是排程補跑（確認一下電腦有沒有意外關機或重開），"
+        "或是開盤價一直拖到界線才拿到。",
     ]
     return {"content": "\n".join(lines)}
 

@@ -7,7 +7,7 @@
 
 所以斷言集中在**平了幾口、什麼方向**，以及**什麼情況下一口都不准平**。
 
-出場刻意**不查商品清單**：下單代碼與最後交易日在 08:50 就知道了，
+出場刻意**不查商品清單**：下單代碼與最後交易日在早上進場時就知道了，
 都寫在狀態檔裡。13:40 再去連一次報價主機只是多一個會失敗的地方，
 而那時候失敗的代價是部位過夜。
 """
@@ -91,7 +91,7 @@ def test_exit_lots_come_from_the_actual_fill_not_the_request():
 
 
 def test_exit_uses_the_order_code_from_the_state_file():
-    """出場不查商品清單——代碼在 08:50 就記下來了。"""
+    """出場不查商品清單——代碼在早上進場時就記下來了。"""
     _, _, broker = _run(_record())
     assert broker.orders[0].order_code == "MTX08"
     assert broker.orders[0].contract_month == "202608"
@@ -574,7 +574,7 @@ def test_more_than_one_lot_makes_the_flags_uninterpretable():
 
     🔴 2026-09-02 實機誤報。使用者持有 1 口多單、程式賣 2 口：
 
-        08:50  SELL 2 @46650   券商記 N（新倉）
+        08:45  SELL 2 @46650   券商記 N（新倉）
         13:40  BUY  2 @46142   券商記 N（新倉）
 
     兩筆都是 N，檢查開火——但單有成交、部位有平掉、帳戶也回到 1 口多單。

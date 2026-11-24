@@ -45,7 +45,7 @@ def _run(broker, cfg=None):
 def test_recovers_when_data_becomes_ready_on_a_later_attempt():
     """前兩次未就緒、第三次成功 → 訊號照常產生。
 
-    這是重試存在的唯一理由：08:50 報價偶爾晚幾十秒才齊。
+    這是重試存在的唯一理由：開盤後報價偶爾晚幾秒才齊（時間表見 test_main_entry_timing.py）。
     """
     broker = FakeBroker(script=[
         QuoteNotReady("TX00AM 開盤價為 0（尚未成交）"),
@@ -75,11 +75,8 @@ def test_no_signal_message_is_distinguishable_from_no_trade():
     assert "TM0000AM" in notifier.text, "要講出是哪個商品出問題，否則無從排查"
 
 
-def test_retry_count_comes_from_config():
-    """把重試次數設成 1 就只試一次——證明設定真的有生效。"""
-    broker = FakeBroker(script=[QuoteNotReady("尚未成交"), GOOD])
-    outcome, _ = _run(broker, cfg=make_config(quote_retry_attempts=1))
-    assert outcome.signal is None, "只准試一次，第二次的好資料不該被拿到"
+# 進場的重試**不再**來自設定檔（原本的 `quote.retry_*` 已在 2026-11-23 拿掉）。
+# 時間表是固定的：08:45:05 讀、試到 entry_cutoff——見 test_main_entry_timing.py 與 ADR-0006。
 
 
 # --- 登入失敗是致命的 ---
@@ -133,6 +130,16 @@ class _ExplodingBroker:
         from broker import PRODUCT_CODES, ContractInfo
         return {c: ContractInfo(code=c, last_trading_day=20260819) for c in PRODUCT_CODES}
 
+    # 開盤前的準備步驟照常成功——這個替身要測的是「讀開盤價那一刻炸掉」
+    def subscribe_quotes(self):
+        pass
+
+    def prepare_order(self):
+        pass
+
+    def reconnect_quotes(self):
+        pass
+
     def get_open_prices(self, expected_trading_day=None):
         self.open_price_calls += 1
         raise self._error
@@ -154,14 +161,3 @@ def test_unexpected_quote_error_is_fatal_and_not_retried():
     assert broker.open_price_calls == 1, "非預期例外不該重試"
     assert len(notifier.sent) == 1
 
-
-def test_zero_retry_attempts_is_rejected_when_config_is_built():
-    """設定成 0 次會讓迴圈一次都不跑（原本拋 TypeError）。
-
-    驗證發生在 Config 建構時，不是執行到一半才發現——
-    設定錯誤偽裝成「今日無訊號」會讓人以為是市場問題。
-    """
-    import pytest
-
-    with pytest.raises(ValueError, match="retry_attempts"):
-        make_config(quote_retry_attempts=0)
